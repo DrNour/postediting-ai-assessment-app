@@ -749,10 +749,6 @@ def teacher_login():
 # Teacher assignment page
 # ============================================================
 
-# ============================================================
-# Teacher assignment page
-# ============================================================
-
 def teacher_assignment_page():
     st.title("Teacher Assignment Creator")
 
@@ -783,7 +779,7 @@ def teacher_assignment_page():
 
         source_text = st.text_area(
             "Source text",
-            placeholder="Paste the original source text here.",
+            placeholder="Paste the original text here.",
             height=180,
         )
 
@@ -837,7 +833,6 @@ def teacher_assignment_page():
                 }
 
                 save_assignment(assignment)
-
                 st.success("Assignment created successfully.")
                 st.rerun()
 
@@ -868,6 +863,7 @@ def teacher_assignment_page():
             use_container_width=True,
             hide_index=True,
         )
+
 
 # ============================================================
 # Student assignment page
