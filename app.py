@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
+from supabase import create_client
 
 import pandas as pd
 import streamlit as st
