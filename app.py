@@ -749,6 +749,10 @@ def teacher_login():
 # Teacher assignment page
 # ============================================================
 
+# ============================================================
+# Teacher assignment page
+# ============================================================
+
 def teacher_assignment_page():
     st.title("Teacher Assignment Creator")
 
@@ -779,7 +783,7 @@ def teacher_assignment_page():
 
         source_text = st.text_area(
             "Source text",
-            placeholder="Paste the original text here.",
+            placeholder="Paste the original source text here.",
             height=180,
         )
 
@@ -818,7 +822,7 @@ def teacher_assignment_page():
             elif not source_text.strip():
                 st.error("Please enter the source text.")
             elif not machine_translation.strip():
-                st.error("Please enter the machine translation.")
+                st.error("Please enter the raw machine translation.")
             else:
                 assignment = {
                     "course": course.strip(),
@@ -833,6 +837,7 @@ def teacher_assignment_page():
                 }
 
                 save_assignment(assignment)
+
                 st.success("Assignment created successfully.")
                 st.rerun()
 
@@ -863,7 +868,6 @@ def teacher_assignment_page():
             use_container_width=True,
             hide_index=True,
         )
-
 
 # ============================================================
 # Student assignment page
