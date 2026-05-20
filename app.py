@@ -133,14 +133,24 @@ TEACHER_PASSWORD = st.secrets.get("TEACHER_PASSWORD", "teacher123")
 # ============================================================
 
 def load_assignments():
-    response = (
-        supabase.table("assignments")
-        .select("*")
-        .order("created_at", desc=True)
-        .execute()
-    )
+    try:
+        response = (
+            supabase.table("assignments")
+            .select("*")
+            .order("created_at", desc=True)
+            .execute()
+        )
 
-    return pd.DataFrame(response.data or [])
+        return pd.DataFrame(response.data or [])
+
+    except Exception as error:
+        st.error("Could not read the assignments table from Supabase.")
+        st.info(
+            "Check that the table named 'assignments' exists in the public schema "
+            "and that Row Level Security is disabled or policies allow SELECT access."
+        )
+        st.code(str(error))
+        return pd.DataFrame()
 
 
 def save_assignment(assignment):
@@ -148,15 +158,24 @@ def save_assignment(assignment):
 
 
 def load_submissions():
-    response = (
-        supabase.table("submissions")
-        .select("*")
-        .order("submitted_at", desc=True)
-        .execute()
-    )
+    try:
+        response = (
+            supabase.table("submissions")
+            .select("*")
+            .order("submitted_at", desc=True)
+            .execute()
+        )
 
-    return pd.DataFrame(response.data or [])
+        return pd.DataFrame(response.data or [])
 
+    except Exception as error:
+        st.error("Could not read the submissions table from Supabase.")
+        st.info(
+            "Check that the table named 'submissions' exists in the public schema "
+            "and that Row Level Security is disabled or policies allow SELECT access."
+        )
+        st.code(str(error))
+        return pd.DataFrame()
 
 def save_submission(submission):
     return supabase.table("submissions").insert(submission).execute()
