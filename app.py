@@ -3,29 +3,13 @@ import zipfile
 import difflib
 import html
 import math
-import uuid
-from pathlib import Path
-from datetime import datetime
 from collections import Counter
-from supabase import create_client
 
 import pandas as pd
 import streamlit as st
 from docx import Document
 from docx.shared import RGBColor
-
-
-# ============================================================
-# Optional old database setup
-# ============================================================
-
-try:
-    from database import create_tables, add_research_columns
-
-    create_tables()
-    add_research_columns()
-except Exception:
-    pass
+from supabase import create_client
 
 
 # ============================================================
@@ -122,133 +106,74 @@ apply_clear_font_style()
 
 
 # ============================================================
-# App settings
+# Supabase connection
 # ============================================================
 
-DATA_DIR = Path("data")
-ASSIGNMENTS_FILE = DATA_DIR / "assignments.csv"
-SUBMISSIONS_FILE = DATA_DIR / "submissions.csv"
-
-TEACHER_PASSWORD = "teacher123"
-
-ASSIGNMENT_COLUMNS = [
-    "assignment_id",
-    "created_at",
-    "course",
-    "title",
-    "instructions",
-    "source_text",
-    "machine_translation",
-    "reference_translation",
-    "due_date",
-    "max_score",
-    "active",
-]
-
-SUBMISSION_COLUMNS = [
-    "submission_id",
-    "assignment_id",
-    "assignment_title",
-    "submitted_at",
-    "student_id",
-    "student_name",
-    "source_text",
-    "machine_translation",
-    "reference_translation",
-    "post_edited_text",
-    "inserted_words",
-    "deleted_words",
-    "replaced_segments",
-    "unchanged_words",
-    "source_word_count",
-    "mt_word_count",
-    "pe_word_count",
-    "mt_pe_cosine_similarity",
-    "mt_pe_cosine_method",
-    "mt_pe_edit_distance_ratio",
-    "mt_pe_length_ratio",
-    "mt_pe_bleu",
-    "mt_pe_chrf",
-    "mt_pe_ter",
-    "mt_pe_bertscore_f1",
-    "pe_reference_cosine_similarity",
-    "pe_reference_cosine_method",
-    "pe_reference_length_ratio",
-    "pe_reference_bleu",
-    "pe_reference_chrf",
-    "pe_reference_ter",
-    "pe_reference_bertscore_f1",
-    "quality_warnings",
-    "teacher_score",
-    "teacher_feedback",
-]
-
-
-# ============================================================
-# Storage functions
-# ============================================================
-
-def ensure_storage():
-    DATA_DIR.mkdir(exist_ok=True)
-
-    if not ASSIGNMENTS_FILE.exists():
-        pd.DataFrame(columns=ASSIGNMENT_COLUMNS).to_csv(
-            ASSIGNMENTS_FILE,
-            index=False,
+@st.cache_resource
+def get_supabase_client():
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception:
+        st.error(
+            "Supabase is not configured. Add SUPABASE_URL and SUPABASE_KEY "
+            "to Streamlit Secrets."
         )
+        st.stop()
 
-    if not SUBMISSIONS_FILE.exists():
-        pd.DataFrame(columns=SUBMISSION_COLUMNS).to_csv(
-            SUBMISSIONS_FILE,
-            index=False,
-        )
 
+supabase = get_supabase_client()
+
+TEACHER_PASSWORD = st.secrets.get("TEACHER_PASSWORD", "teacher123")
+
+
+# ============================================================
+# Supabase storage functions
+# ============================================================
 
 def load_assignments():
-    ensure_storage()
-    df = pd.read_csv(ASSIGNMENTS_FILE)
+    response = (
+        supabase.table("assignments")
+        .select("*")
+        .order("created_at", desc=True)
+        .execute()
+    )
 
-    for column in ASSIGNMENT_COLUMNS:
-        if column not in df.columns:
-            df[column] = ""
-
-    return df[ASSIGNMENT_COLUMNS]
+    return pd.DataFrame(response.data or [])
 
 
 def save_assignment(assignment):
-    ensure_storage()
-    df = load_assignments()
-    df = pd.concat([df, pd.DataFrame([assignment])], ignore_index=True)
-    df.to_csv(ASSIGNMENTS_FILE, index=False)
+    return supabase.table("assignments").insert(assignment).execute()
 
 
 def load_submissions():
-    ensure_storage()
-    df = pd.read_csv(SUBMISSIONS_FILE)
+    response = (
+        supabase.table("submissions")
+        .select("*")
+        .order("submitted_at", desc=True)
+        .execute()
+    )
 
-    for column in SUBMISSION_COLUMNS:
-        if column not in df.columns:
-            df[column] = ""
-
-    return df[SUBMISSION_COLUMNS]
+    return pd.DataFrame(response.data or [])
 
 
 def save_submission(submission):
-    ensure_storage()
-    df = load_submissions()
-    df = pd.concat([df, pd.DataFrame([submission])], ignore_index=True)
-    df.to_csv(SUBMISSIONS_FILE, index=False)
+    return supabase.table("submissions").insert(submission).execute()
 
 
 def update_submission_review(submission_id, teacher_score, teacher_feedback):
-    df = load_submissions()
-
-    mask = df["submission_id"].astype(str) == str(submission_id)
-
-    df.loc[mask, "teacher_score"] = teacher_score
-    df.loc[mask, "teacher_feedback"] = teacher_feedback
-
-    df.to_csv(SUBMISSIONS_FILE, index=False)
+    return (
+        supabase.table("submissions")
+        .update(
+            {
+                "teacher_score": teacher_score,
+                "teacher_feedback": teacher_feedback,
+            }
+        )
+        .eq("submission_id", submission_id)
+        .execute()
+    )
 
 
 # ============================================================
@@ -684,9 +609,21 @@ def create_submission_docx(submission):
     )
 
     add_docx_section(document, "Source Text", submission.get("source_text"))
-    add_docx_section(document, "Raw Machine Translation", submission.get("machine_translation"))
-    add_docx_section(document, "Reference Translation", submission.get("reference_translation"))
-    add_docx_section(document, "Student Post-Edited Text", submission.get("post_edited_text"))
+    add_docx_section(
+        document,
+        "Raw Machine Translation",
+        submission.get("machine_translation"),
+    )
+    add_docx_section(
+        document,
+        "Reference Translation",
+        submission.get("reference_translation"),
+    )
+    add_docx_section(
+        document,
+        "Student Post-Edited Text",
+        submission.get("post_edited_text"),
+    )
 
     add_track_changes_to_docx(
         document,
@@ -738,7 +675,9 @@ def create_submission_docx(submission):
         row_cells[1].text = safe_text(value)
 
     document.add_heading("Teacher Review", level=2)
-    document.add_paragraph(f"Teacher score: {safe_text(submission.get('teacher_score'))}")
+    document.add_paragraph(
+        f"Teacher score: {safe_text(submission.get('teacher_score'))}"
+    )
     document.add_paragraph(
         f"Teacher feedback: {safe_text(submission.get('teacher_feedback'))}"
     )
@@ -860,9 +799,10 @@ def teacher_assignment_page():
 
         max_score = st.number_input(
             "Maximum score",
-            min_value=1,
-            max_value=100,
-            value=10,
+            min_value=1.0,
+            max_value=100.0,
+            value=10.0,
+            step=0.5,
         )
 
         active = st.checkbox(
@@ -881,8 +821,6 @@ def teacher_assignment_page():
                 st.error("Please enter the machine translation.")
             else:
                 assignment = {
-                    "assignment_id": str(uuid.uuid4())[:8],
-                    "created_at": datetime.now().isoformat(timespec="seconds"),
                     "course": course.strip(),
                     "title": title.strip(),
                     "instructions": instructions.strip(),
@@ -890,12 +828,13 @@ def teacher_assignment_page():
                     "machine_translation": machine_translation.strip(),
                     "reference_translation": reference_translation.strip(),
                     "due_date": str(due_date),
-                    "max_score": max_score,
-                    "active": "yes" if active else "no",
+                    "max_score": float(max_score),
+                    "active": bool(active),
                 }
 
                 save_assignment(assignment)
                 st.success("Assignment created successfully.")
+                st.rerun()
 
     st.divider()
 
@@ -906,8 +845,21 @@ def teacher_assignment_page():
     if assignments.empty:
         st.info("No assignments created yet.")
     else:
+        display_columns = [
+            "created_at",
+            "course",
+            "title",
+            "due_date",
+            "max_score",
+            "active",
+        ]
+
+        available_columns = [
+            column for column in display_columns if column in assignments.columns
+        ]
+
         st.dataframe(
-            assignments.sort_values("created_at", ascending=False),
+            assignments[available_columns],
             use_container_width=True,
             hide_index=True,
         )
@@ -926,13 +878,11 @@ def student_assignment_page():
         st.info("No assignments are available yet.")
         return
 
-    active_assignments = assignments[
-        assignments["active"]
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .isin(["yes", "true", "1"])
-    ]
+    if "active" not in assignments.columns:
+        st.info("No active assignments are currently available.")
+        return
+
+    active_assignments = assignments[assignments["active"] == True]
 
     if active_assignments.empty:
         st.info("No active assignments are currently available.")
@@ -941,7 +891,10 @@ def student_assignment_page():
     assignment_labels = []
 
     for _, row in active_assignments.iterrows():
-        label = f"{row['title']} — due {row['due_date']} — ID {row['assignment_id']}"
+        label = (
+            f"{row.get('title', 'Untitled')} — due {row.get('due_date', '')} "
+            f"— ID {row.get('assignment_id', '')}"
+        )
         assignment_labels.append(label)
 
     selected_label = st.selectbox("Choose an assignment", assignment_labels)
@@ -954,24 +907,24 @@ def student_assignment_page():
 
     st.subheader(selected_assignment["title"])
 
-    if pd.notna(selected_assignment["course"]):
-        st.write(f"**Course:** {selected_assignment['course']}")
+    if safe_text(selected_assignment.get("course")):
+        st.write(f"**Course:** {selected_assignment.get('course')}")
 
-    st.write(f"**Due date:** {selected_assignment['due_date']}")
-    st.write(f"**Maximum score:** {selected_assignment['max_score']}")
+    st.write(f"**Due date:** {selected_assignment.get('due_date')}")
+    st.write(f"**Maximum score:** {selected_assignment.get('max_score')}")
 
     st.markdown("### Instructions")
-    st.write(selected_assignment["instructions"])
+    st.write(selected_assignment.get("instructions", ""))
 
     st.markdown("### Source Text")
     st.text_area(
         "Source text",
-        selected_assignment["source_text"],
+        selected_assignment.get("source_text", ""),
         height=180,
         disabled=True,
     )
 
-    raw_mt = selected_assignment["machine_translation"]
+    raw_mt = selected_assignment.get("machine_translation", "")
 
     st.markdown("### Raw Machine Translation")
     st.text_area(
@@ -1027,10 +980,22 @@ def student_assignment_page():
     st.dataframe(
         pd.DataFrame(
             [
-                {"Edit feature": "Inserted words", "Value": edit_summary["inserted_words"]},
-                {"Edit feature": "Deleted words", "Value": edit_summary["deleted_words"]},
-                {"Edit feature": "Replaced segments", "Value": edit_summary["replaced_segments"]},
-                {"Edit feature": "Unchanged words", "Value": edit_summary["unchanged_words"]},
+                {
+                    "Edit feature": "Inserted words",
+                    "Value": edit_summary["inserted_words"],
+                },
+                {
+                    "Edit feature": "Deleted words",
+                    "Value": edit_summary["deleted_words"],
+                },
+                {
+                    "Edit feature": "Replaced segments",
+                    "Value": edit_summary["replaced_segments"],
+                },
+                {
+                    "Edit feature": "Unchanged words",
+                    "Value": edit_summary["unchanged_words"],
+                },
             ]
         ),
         use_container_width=True,
@@ -1051,7 +1016,10 @@ def student_assignment_page():
     use_bert = st.checkbox(
         "Calculate BERTScore",
         value=False,
-        help="BERTScore is useful but slower. Use it when a reference translation is available.",
+        help=(
+            "BERTScore is useful but slower. For normal classroom use, "
+            "you can leave this off."
+        ),
     )
 
     bert_language = st.selectbox(
@@ -1130,7 +1098,7 @@ def student_assignment_page():
                 bert_language=bert_language,
             )
 
-            source_word_count = word_count(selected_assignment["source_text"])
+            source_word_count = word_count(selected_assignment.get("source_text", ""))
             mt_word_count = word_count(raw_mt)
             pe_word_count = word_count(student_answer)
 
@@ -1141,13 +1109,11 @@ def student_assignment_page():
             )
 
             submission = {
-                "submission_id": str(uuid.uuid4())[:8],
-                "assignment_id": selected_assignment["assignment_id"],
-                "assignment_title": selected_assignment["title"],
-                "submitted_at": datetime.now().isoformat(timespec="seconds"),
+                "assignment_id": selected_assignment.get("assignment_id"),
+                "assignment_title": selected_assignment.get("title"),
                 "student_id": student_id.strip(),
                 "student_name": student_name.strip(),
-                "source_text": selected_assignment["source_text"],
+                "source_text": selected_assignment.get("source_text", ""),
                 "machine_translation": raw_mt,
                 "reference_translation": reference_translation,
                 "post_edited_text": student_answer.strip(),
@@ -1159,7 +1125,7 @@ def student_assignment_page():
                 "mt_word_count": mt_word_count,
                 "pe_word_count": pe_word_count,
                 "quality_warnings": quality_warnings,
-                "teacher_score": "",
+                "teacher_score": None,
                 "teacher_feedback": "",
             }
 
@@ -1249,13 +1215,72 @@ def teacher_submissions_page():
 
     st.divider()
 
-    csv_data = filtered.to_csv(index=False).encode("utf-8")
+    st.subheader("Research Export")
+
+    research_columns = [
+        "submitted_at",
+        "assignment_id",
+        "assignment_title",
+        "student_id",
+        "student_name",
+        "source_text",
+        "machine_translation",
+        "reference_translation",
+        "post_edited_text",
+        "inserted_words",
+        "deleted_words",
+        "replaced_segments",
+        "unchanged_words",
+        "source_word_count",
+        "mt_word_count",
+        "pe_word_count",
+        "mt_pe_cosine_similarity",
+        "mt_pe_cosine_method",
+        "mt_pe_edit_distance_ratio",
+        "mt_pe_length_ratio",
+        "mt_pe_bleu",
+        "mt_pe_chrf",
+        "mt_pe_ter",
+        "mt_pe_bertscore_f1",
+        "pe_reference_cosine_similarity",
+        "pe_reference_cosine_method",
+        "pe_reference_length_ratio",
+        "pe_reference_bleu",
+        "pe_reference_chrf",
+        "pe_reference_ter",
+        "pe_reference_bertscore_f1",
+        "quality_warnings",
+        "teacher_score",
+        "teacher_feedback",
+    ]
+
+    available_research_columns = [
+        column for column in research_columns if column in filtered.columns
+    ]
+
+    research_df = filtered[available_research_columns]
+
+    csv_data = research_df.to_csv(index=False).encode("utf-8")
 
     st.download_button(
-        "Download submissions as CSV",
+        "Download research dataset as CSV",
         data=csv_data,
-        file_name="student_submissions.csv",
+        file_name="postediting_research_dataset.csv",
         mime="text/csv",
+    )
+
+    excel_buffer = io.BytesIO()
+
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        research_df.to_excel(writer, index=False, sheet_name="Research Data")
+
+    excel_buffer.seek(0)
+
+    st.download_button(
+        "Download research dataset as Excel",
+        data=excel_buffer,
+        file_name="postediting_research_dataset.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
     zip_buffer = create_zip_of_word_docs(filtered)
@@ -1275,8 +1300,8 @@ def teacher_submissions_page():
 
     for _, row in filtered.iterrows():
         label = (
-            f"{row['student_id']} — {row['student_name']} — "
-            f"{row['submitted_at']} — ID {row['submission_id']}"
+            f"{row.get('student_id', '')} — {row.get('student_name', '')} — "
+            f"{row.get('submitted_at', '')} — ID {row.get('submission_id', '')}"
         )
         submission_labels.append(label)
 
@@ -1294,7 +1319,7 @@ def teacher_submissions_page():
     st.markdown("### Student Post-Edited Text")
     st.text_area(
         "Post-edited text",
-        selected_submission["post_edited_text"],
+        selected_submission.get("post_edited_text", ""),
         height=250,
         disabled=True,
     )
@@ -1305,8 +1330,8 @@ def teacher_submissions_page():
         f"""
         <div class="track-box">
         {make_track_changes_html(
-            selected_submission["machine_translation"],
-            selected_submission["post_edited_text"],
+            selected_submission.get("machine_translation", ""),
+            selected_submission.get("post_edited_text", ""),
         )}
         </div>
         """,
@@ -1361,15 +1386,16 @@ def teacher_submissions_page():
 
     max_score = 100.0
 
-    matching_assignment = assignments[
-        assignments["title"].astype(str) == str(selected_assignment_title)
-    ]
+    if not assignments.empty and "title" in assignments.columns:
+        matching_assignment = assignments[
+            assignments["title"].astype(str) == str(selected_assignment_title)
+        ]
 
-    if not matching_assignment.empty:
-        try:
-            max_score = float(matching_assignment.iloc[0]["max_score"])
-        except Exception:
-            max_score = 100.0
+        if not matching_assignment.empty:
+            try:
+                max_score = float(matching_assignment.iloc[0]["max_score"])
+            except Exception:
+                max_score = 100.0
 
     current_score = selected_submission.get("teacher_score", 0)
 
@@ -1407,7 +1433,7 @@ def teacher_submissions_page():
     single_filename = (
         clean_filename(selected_assignment_title)
         + "_"
-        + clean_filename(selected_submission["student_id"])
+        + clean_filename(selected_submission.get("student_id"))
         + ".docx"
     )
 
@@ -1428,16 +1454,15 @@ def home_page():
 
     st.write(
         """
-This Streamlit app supports post-editing assessment, teacher annotation,
-AI feedback, and research evaluation for translation training.
+This Streamlit app supports post-editing assessment, teacher assignment creation,
+student submissions, automatic quality metrics, teacher review, and research export.
 
 The core principle is: **AI suggests. Teacher decides.**
 """
     )
 
     st.warning(
-        "Public/demo use should rely on synthetic or anonymised data only. "
-        "Do not upload identifiable student information to a public deployment."
+        "For real student data, use anonymised IDs where possible and protect access carefully."
     )
 
     st.header("Workflow")
@@ -1449,7 +1474,7 @@ The core principle is: **AI suggests. Teacher decides.**
 3. **Track Changes Preview** - the app shows additions and deletions.
 4. **MT vs PE Comparison** - the app compares raw MT and post-edited text.
 5. **Reference Comparison** - if a reference translation exists, the app estimates quality.
-6. **Teacher Dashboard** - teachers review and download submissions.
+6. **Teacher Dashboard** - teachers review submissions and download research data.
 """
     )
 
@@ -1466,6 +1491,20 @@ The core principle is: **AI suggests. Teacher decides.**
 - Optional BERTScore
 - Word counts
 - Inserted, deleted, replaced, and unchanged words
+- Teacher score and teacher feedback
+"""
+    )
+
+    st.header("Research Exports")
+
+    st.markdown(
+        """
+The teacher dashboard can export:
+
+- submissions as CSV
+- submissions as Excel
+- individual Word documents
+- a ZIP file containing all Word documents
 """
     )
 
