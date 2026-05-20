@@ -1,15 +1,37 @@
-
 import streamlit as st
 from database import create_tables, add_research_columns
 from pathlib import Path
 from datetime import datetime
 import uuid
 import pandas as pd
+
+
 # ============================================================
-# Assignment system
+# Page configuration
+# ============================================================
+
+st.set_page_config(
+    page_title="AI Post-Editing Assessment App",
+    page_icon="📘",
+    layout="wide"
+)
+
+
+# ============================================================
+# Database setup
+# ============================================================
+
+create_tables()
+add_research_columns()
+
+
+# ============================================================
+# Assignment system settings
 # ============================================================
 
 ASSIGNMENTS_FILE = Path("data/assignments.csv")
+
+TEACHER_PASSWORD = "teacher123"
 
 ASSIGNMENT_COLUMNS = [
     "assignment_id",
@@ -24,6 +46,10 @@ ASSIGNMENT_COLUMNS = [
     "active",
 ]
 
+
+# ============================================================
+# Assignment storage functions
+# ============================================================
 
 def ensure_assignment_storage():
     """Create the data folder and assignments file if they do not exist."""
@@ -50,36 +76,47 @@ def save_assignment(assignment):
     df.to_csv(ASSIGNMENTS_FILE, index=False)
 
 
-def get_teacher_password():
-    """
-    Reads the teacher password from Streamlit secrets.
-    If no secret exists, it uses a temporary default password.
-    Change this later before real deployment.
-    """
-    try:
-        return st.secrets.get("TEACHER_PASSWORD", "teacher123")
-    except Exception:
-        return "teacher123"
-
+# ============================================================
+# Teacher login
+# ============================================================
 
 def teacher_login():
     """Simple teacher password protection."""
+
+    if "teacher_logged_in" not in st.session_state:
+        st.session_state.teacher_logged_in = False
+
+    if st.session_state.teacher_logged_in:
+        st.success("Teacher access granted.")
+
+        if st.button("Log out"):
+            st.session_state.teacher_logged_in = False
+            st.rerun()
+
+        return True
+
     st.subheader("Teacher Login")
 
     password = st.text_input("Enter teacher password", type="password")
 
-    if password == get_teacher_password():
-        st.success("Teacher access granted.")
-        return True
-
-    if password:
-        st.error("Incorrect password.")
+    if st.button("Login"):
+        if password == TEACHER_PASSWORD:
+            st.session_state.teacher_logged_in = True
+            st.success("Teacher access granted.")
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
 
     return False
 
 
+# ============================================================
+# Teacher assignment page
+# ============================================================
+
 def teacher_assignment_page():
     """Page where teachers create and view assignments."""
+
     st.title("Teacher Assignment Creator")
 
     if not teacher_login():
@@ -91,8 +128,15 @@ def teacher_assignment_page():
     st.subheader("Create a New Assignment")
 
     with st.form("create_assignment_form"):
-        course = st.text_input("Course name", placeholder="Example: Translation Studies")
-        title = st.text_input("Assignment title", placeholder="Example: Post-editing Task 1")
+        course = st.text_input(
+            "Course name",
+            placeholder="Example: Translation Studies"
+        )
+
+        title = st.text_input(
+            "Assignment title",
+            placeholder="Example: Post-editing Task 1"
+        )
 
         instructions = st.text_area(
             "Instructions for students",
@@ -121,7 +165,10 @@ def teacher_assignment_page():
             value=10,
         )
 
-        active = st.checkbox("Make this assignment visible to students", value=True)
+        active = st.checkbox(
+            "Make this assignment visible to students",
+            value=True
+        )
 
         submitted = st.form_submit_button("Create Assignment")
 
@@ -147,7 +194,6 @@ def teacher_assignment_page():
                 }
 
                 save_assignment(assignment)
-
                 st.success("Assignment created successfully.")
 
     st.divider()
@@ -166,8 +212,13 @@ def teacher_assignment_page():
         )
 
 
+# ============================================================
+# Student assignment page
+# ============================================================
+
 def student_assignment_page():
     """Page where students can view available assignments."""
+
     st.title("Student Assignments")
 
     assignments = load_assignments()
@@ -234,34 +285,33 @@ def student_assignment_page():
             st.info(
                 "Next step: we can add code to save student submissions and calculate scores."
             )
-st.set_page_config(
-    page_title="AI Post-Editing Assessment App",
-    page_icon="📘",
-    layout="wide"
-)
 
-create_tables()
-add_research_columns()
 
-st.title("AI-Assisted Post-Editing Assessment App")
+# ============================================================
+# Home page
+# ============================================================
 
-st.write(
-    """
+def home_page():
+    st.title("AI-Assisted Post-Editing Assessment App")
+
+    st.write(
+        """
 This Streamlit app supports post-editing assessment, teacher annotation,
 AI feedback, and research evaluation for translation training.
 
 The core principle is: **AI suggests. Teacher decides.**
 """
-)
+    )
 
-st.warning(
-    "Public/demo use should rely on synthetic or anonymised data only. "
-    "Do not upload identifiable student information to a public deployment."
-)
+    st.warning(
+        "Public/demo use should rely on synthetic or anonymised data only. "
+        "Do not upload identifiable student information to a public deployment."
+    )
 
-st.header("Workflow")
-st.markdown(
-    """
+    st.header("Workflow")
+
+    st.markdown(
+        """
 1. **Student Submission** - save source text, MT output, post-edited text, and editing time.
 2. **Teacher Annotation** - label translation errors using a structured taxonomy.
 3. **Dashboard** - view editing-time and annotation summaries.
@@ -269,17 +319,44 @@ st.markdown(
 5. **AI Feedback** - generate draft AI feedback using the taxonomy and rubric.
 6. **Teacher Review** - approve, edit, or reject AI feedback.
 7. **Evaluation** - export research datasets and calculate evaluation metrics.
+8. **Assignments** - teachers create post-editing assignments for students.
 """
-)
+    )
 
-st.header("Recommended Use")
-st.markdown(
-    """
+    st.header("Recommended Use")
+
+    st.markdown(
+        """
 - Start with a small pilot dataset.
 - Keep real student data private and anonymised.
 - Use teacher review before feedback reaches students.
 - Treat AI outputs as draft feedback, not final grades.
 """
+    )
+
+    st.success("Use the sidebar to open each page.")
+
+
+# ============================================================
+# Sidebar navigation
+# ============================================================
+
+st.sidebar.title("Navigation")
+
+page = st.sidebar.radio(
+    "Choose page",
+    [
+        "Home",
+        "Student Assignments",
+        "Teacher Assignments",
+    ],
 )
 
-st.success("Use the sidebar to open each page.")
+if page == "Home":
+    home_page()
+
+elif page == "Student Assignments":
+    student_assignment_page()
+
+elif page == "Teacher Assignments":
+    teacher_assignment_page()
