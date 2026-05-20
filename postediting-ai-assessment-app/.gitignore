@@ -1,0 +1,7 @@
+.env
+postediting_data.db
+__pycache__/
+*.pyc
+.DS_Store
+models/
+.streamlit/secrets.toml

@@ -1,0 +1,12 @@
+streamlit
+pandas
+rapidfuzz
+sentence-transformers
+scikit-learn
+joblib
+openai
+python-dotenv
+matplotlib
+plotly
+scipy
+statsmodels

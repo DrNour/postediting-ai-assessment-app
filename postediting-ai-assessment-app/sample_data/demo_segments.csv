@@ -1,0 +1,6 @@
+segment_id,student_id,task_id,source_text,mt_output,post_edited_text,editing_time_seconds,teacher_category,teacher_subcategory,teacher_severity
+SEG001,S001,T001,"زار الوزير الجامعة أمس.","The minister visited the university yesterday.","The minister visited the university yesterday.",52,accuracy,mistranslation,major
+SEG002,S002,T001,"الاعتماد الأكاديمي مهم للجامعة.","Academic dependence is important for the university.","Academic accreditation is important for the university.",78,terminology,wrong_term,major
+SEG003,S003,T001,"أعلنت الجامعة عن سياسة جديدة.","The university announced about a new policy.","The university announced a new policy.",43,fluency,grammar,minor
+SEG004,S004,T002,"يرجى مراجعة مكتب التسجيل قبل الموعد النهائي.","Please review the registration office before the deadline.","Please contact the registration office before the deadline.",66,accuracy,mistranslation,major
+SEG005,S005,T002,"سيبدأ التسجيل يوم الأحد.","Registration will start on Sunday.","Registration will begin on Sunday.",35,style_register,unnatural_style,minor
