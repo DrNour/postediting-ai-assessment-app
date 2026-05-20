@@ -10,3 +10,8 @@ matplotlib
 plotly
 scipy
 statsmodels
+supabase
+sacrebleu
+bert-score
+python-Levenshtein
+python-docx
