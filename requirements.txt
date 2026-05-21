@@ -4,7 +4,6 @@ rapidfuzz
 sentence-transformers
 scikit-learn
 joblib
-openai
 python-dotenv
 matplotlib
 plotly
@@ -15,3 +14,4 @@ sacrebleu
 bert-score
 python-Levenshtein
 python-docx
+openpyxl
