@@ -154,7 +154,16 @@ def load_assignments():
 
 
 def save_assignment(assignment):
-    return supabase.table("assignments").insert(assignment).execute()
+    try:
+        return supabase.table("assignments").insert(assignment).execute()
+
+    except Exception as error:
+        st.error("Could not save the assignment to Supabase.")
+        st.write("The assignment data being sent was:")
+        st.json(assignment)
+        st.write("Supabase error:")
+        st.code(str(error))
+        st.stop()
 
 
 def load_submissions():
