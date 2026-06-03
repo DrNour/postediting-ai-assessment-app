@@ -167,9 +167,6 @@ The demo dataset is synthetic/anonymised. Real student submissions should not be
 3. How useful do teachers perceive AI-generated feedback to be?
 4. What types of AI feedback require the most teacher editing?
 
-## Suggested CV Bullet
-
-Developed a Python/Streamlit app for AI-assisted post-editing assessment, integrating SQLite data storage, teacher annotation, MT-vs-post-edited comparison metrics, semantic similarity scoring, GenAI feedback, and teacher review workflows.
 
 ## Limitations
 
