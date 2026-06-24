@@ -1,27 +1,122 @@
-from rapidfuzz import fuzz
-from difflib import SequenceMatcher
+"""
+metrics.py
+
+Research-oriented MT / HT / PE evaluation utilities for EduApp.
+
+This file calculates:
+
+1. MT-to-PE post-editing effort metrics
+   - cosine similarity
+   - edit-distance ratio
+   - length ratio
+   - lexical similarity
+   - change ratio
+   - inserted / deleted / replaced / unchanged words
+
+2. Reference-based translation quality metrics
+   - BLEU
+   - chrF
+   - TER
+   - optional BERTScore
+   - optional COMET through an external scorer
+
+3. Teacher evaluation fields
+   - teacher score
+   - teacher feedback
+
+Important:
+- MT-to-PE comparison measures editing effort, not true translation quality.
+- True quality metrics require an independent reference translation.
+"""
+
+import math
 import re
+from collections import Counter
+from difflib import SequenceMatcher
+
+from rapidfuzz import fuzz
+
+
+# ============================================================
+# Basic text utilities
+# ============================================================
+
+def safe_text(text):
+    """
+    Converts None or non-string values into safe strings.
+    """
+    if text is None:
+        return ""
+    if isinstance(text, str):
+        return text.strip()
+    return str(text).strip()
+
+
+def tokenize_words(text):
+    """
+    Unicode-aware word tokenizer.
+
+    Works for English and Arabic better than simple split(),
+    though it is still intentionally lightweight.
+    """
+    text = safe_text(text)
+    return re.findall(r"\b\w+\b", text, flags=re.UNICODE)
 
 
 def word_count(text):
     """
-    Simple whitespace-based word count.
-    Works reasonably for English and Arabic, but can be replaced later
-    with a stronger tokenizer if needed.
+    Simple word count.
     """
-    text = safe_text(text)
-    if not text:
-        return 0
-    return len(text.split())
+    return len(tokenize_words(text))
 
 
 def word_count_difference(original_text, revised_text):
+    """
+    Difference in word count from original to revised.
+    """
     return word_count(revised_text) - word_count(original_text)
+
+
+# ============================================================
+# Similarity and change metrics
+# ============================================================
+
+def cosine_similarity(text_a, text_b):
+    """
+    Lightweight token-frequency cosine similarity.
+
+    Returns a value between 0 and 1.
+    Higher = more similar.
+    Lower = more changed.
+    """
+    tokens_a = tokenize_words(text_a)
+    tokens_b = tokenize_words(text_b)
+
+    if not tokens_a and not tokens_b:
+        return 1.0
+
+    if not tokens_a or not tokens_b:
+        return 0.0
+
+    counts_a = Counter(tokens_a)
+    counts_b = Counter(tokens_b)
+
+    vocabulary = set(counts_a) | set(counts_b)
+
+    dot_product = sum(counts_a[token] * counts_b[token] for token in vocabulary)
+    norm_a = math.sqrt(sum(counts_a[token] ** 2 for token in vocabulary))
+    norm_b = math.sqrt(sum(counts_b[token] ** 2 for token in vocabulary))
+
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+
+    return dot_product / (norm_a * norm_b)
 
 
 def lexical_similarity(text_a, text_b):
     """
     RapidFuzz lexical similarity between two strings.
+
     Returns a value between 0 and 1.
     """
     text_a = safe_text(text_a)
@@ -36,33 +131,59 @@ def lexical_similarity(text_a, text_b):
 def change_ratio(text_a, text_b):
     """
     Approximate lexical change ratio.
+
     Returns a value between 0 and 1.
+    Higher = more changed.
     """
     return 1 - lexical_similarity(text_a, text_b)
 
 
-def tokenize_words(text):
+def edit_distance_ratio(text_a, text_b):
     """
-    Unicode-aware word tokenizer.
+    Normalized edit-distance ratio based on SequenceMatcher.
 
-    This is still simple, but better than plain split() for counting
-    word-level insertions, deletions, replacements, and unchanged words.
+    Returns a value between 0 and 1.
+    Higher = more editing/change.
     """
-    text = safe_text(text)
-    return re.findall(r"\b\w+\b", text, flags=re.UNICODE)
+    text_a = safe_text(text_a)
+    text_b = safe_text(text_b)
 
+    if not text_a and not text_b:
+        return 0.0
+
+    similarity = SequenceMatcher(None, text_a, text_b).ratio()
+    return 1 - similarity
+
+
+def length_ratio(revised_text, original_text):
+    """
+    Length ratio = revised word count / original word count.
+
+    Example:
+    - 1.00 = same length
+    - 1.20 = revised text is 20% longer
+    - 0.80 = revised text is 20% shorter
+    """
+    revised_count = word_count(revised_text)
+    original_count = word_count(original_text)
+
+    if original_count == 0:
+        return None
+
+    return revised_count / original_count
+
+
+# ============================================================
+# Word-level edit operations
+# ============================================================
 
 def word_edit_operations(original_text, revised_text):
     """
-    Counts inserted, deleted, replaced, and unchanged words from
-    original_text to revised_text.
+    Counts inserted, deleted, replaced, and unchanged words.
 
-    In this project:
-    - original_text is usually raw MT
-    - revised_text is usually post-edited MT
-
-    replaced_words counts original-side words that were replaced.
-    replacement_output_words counts revised-side words that replaced them.
+    Usually:
+    - original_text = raw MT
+    - revised_text = post-edited MT
     """
 
     original_tokens = tokenize_words(original_text)
@@ -119,6 +240,108 @@ def word_edit_operations(original_text, revised_text):
     }
 
 
+# ============================================================
+# Reference-based metrics: BLEU, chrF, TER
+# ============================================================
+
+def reference_based_scores(candidate_text, reference_text):
+    """
+    Calculates BLEU, chrF, and TER using sacrebleu.
+
+    candidate_text:
+        MT, HT, or PE translation.
+
+    reference_text:
+        Independent reference translation.
+
+    Returns:
+        dict with bleu, chrf, ter.
+
+    If sacrebleu is not installed, returns None values.
+    """
+
+    candidate_text = safe_text(candidate_text)
+    reference_text = safe_text(reference_text)
+
+    if not candidate_text or not reference_text:
+        return {
+            "bleu": None,
+            "chrf": None,
+            "ter": None,
+        }
+
+    try:
+        import sacrebleu
+
+        bleu = sacrebleu.corpus_bleu(
+            [candidate_text],
+            [[reference_text]],
+        ).score
+
+        chrf = sacrebleu.corpus_chrf(
+            [candidate_text],
+            [[reference_text]],
+        ).score
+
+        ter = sacrebleu.corpus_ter(
+            [candidate_text],
+            [[reference_text]],
+        ).score
+
+        return {
+            "bleu": bleu,
+            "chrf": chrf,
+            "ter": ter,
+        }
+
+    except Exception:
+        return {
+            "bleu": None,
+            "chrf": None,
+            "ter": None,
+        }
+
+
+# ============================================================
+# Optional BERTScore
+# ============================================================
+
+def bert_score(candidate_text, reference_text, language="en"):
+    """
+    Optional BERTScore F1.
+
+    Requires:
+        pip install bert-score
+
+    If bert-score is not installed or fails, returns None.
+    """
+
+    candidate_text = safe_text(candidate_text)
+    reference_text = safe_text(reference_text)
+
+    if not candidate_text or not reference_text:
+        return None
+
+    try:
+        from bert_score import score
+
+        _, _, f1 = score(
+            [candidate_text],
+            [reference_text],
+            lang=language,
+            verbose=False,
+        )
+
+        return float(f1[0])
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# Add quality metrics against an independent reference
+# ============================================================
+
 def add_reference_based_quality_scores(
     results,
     prefix,
@@ -132,16 +355,12 @@ def add_reference_based_quality_scores(
     """
     Adds BLEU, chrF, TER, optional BERTScore, and optional COMET.
 
-    candidate_text = MT, HT, or PE output
-    reference_text = independent human/reference translation
-
-    Important:
-    These are quality-oriented only when reference_text is an independent
-    reference, not the raw MT.
+    These are quality-oriented only when reference_text is independent.
     """
 
     candidate_text = safe_text(candidate_text)
     reference_text = safe_text(reference_text)
+    source_text = safe_text(source_text)
 
     if not candidate_text or not reference_text:
         results[f"{prefix}_bleu"] = None
@@ -152,8 +371,8 @@ def add_reference_based_quality_scores(
         return results
 
     scores = reference_based_scores(
-        candidate_text,
-        reference_text,
+        candidate_text=candidate_text,
+        reference_text=reference_text,
     )
 
     results[f"{prefix}_bleu"] = scores.get("bleu")
@@ -177,16 +396,25 @@ def add_reference_based_quality_scores(
                 reference=reference_text,
             )
         except TypeError:
-            results[f"{prefix}_comet"] = comet_scorer(
-                source_text,
-                candidate_text,
-                reference_text,
-            )
+            try:
+                results[f"{prefix}_comet"] = comet_scorer(
+                    source_text,
+                    candidate_text,
+                    reference_text,
+                )
+            except Exception:
+                results[f"{prefix}_comet"] = None
+        except Exception:
+            results[f"{prefix}_comet"] = None
     else:
         results[f"{prefix}_comet"] = None
 
     return results
 
+
+# ============================================================
+# Main full comparison function
+# ============================================================
 
 def compare_postedit_with_raw_mt(
     raw_mt,
@@ -203,57 +431,10 @@ def compare_postedit_with_raw_mt(
     """
     Evaluates raw MT, human translation, and post-edited MT.
 
-    This function separates three layers:
-
-    1. MT-to-PE effort:
-       How much did the student change the raw MT?
-
-    2. Reference-based quality:
-       How good are MT, HT, and PE against an independent reference?
-
-    3. Teacher assessment:
-       Human score and feedback.
-
-    Parameters
-    ----------
-    raw_mt : str
-        Original machine translation output.
-
-    post_edited_text : str
-        Student's post-edited version of the raw MT.
-
-    human_translation : str, optional
-        Student's human translation, if available.
-
-    reference_text : str, optional
-        Independent reference translation.
-        Needed for true quality metrics.
-
-    source_text : str, optional
-        Source text. Needed for COMET if using a COMET scorer.
-
-    teacher_score : float or int, optional
-        Teacher's score.
-
-    teacher_feedback : str, optional
-        Teacher's qualitative feedback.
-
-    use_bert : bool
-        Whether to calculate BERTScore.
-
-    bert_language : str
-        Language code for BERTScore. For Arabic, use "ar".
-        For English, use "en".
-
-    comet_scorer : callable, optional
-        Optional COMET scoring function.
-        Expected signature:
-        comet_scorer(source, candidate, reference)
-
-    Returns
-    -------
-    dict
-        Dictionary of effort, quality, and teacher-assessment metrics.
+    Layers:
+    1. MT-to-PE effort
+    2. Reference-based quality
+    3. Teacher assessment
     """
 
     raw_mt = safe_text(raw_mt)
@@ -265,9 +446,9 @@ def compare_postedit_with_raw_mt(
 
     results = {}
 
-    # ---------------------------------------------------------
-    # 1. Basic word counts
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # 1. Word counts
+    # --------------------------------------------------------
 
     results["raw_mt_word_count"] = word_count(raw_mt)
     results["pe_word_count"] = word_count(post_edited_text)
@@ -276,19 +457,17 @@ def compare_postedit_with_raw_mt(
         post_edited_text,
     )
 
-    if human_translation:
-        results["ht_word_count"] = word_count(human_translation)
-    else:
-        results["ht_word_count"] = None
+    results["ht_word_count"] = (
+        word_count(human_translation) if human_translation else None
+    )
 
-    if reference_text:
-        results["reference_word_count"] = word_count(reference_text)
-    else:
-        results["reference_word_count"] = None
+    results["reference_word_count"] = (
+        word_count(reference_text) if reference_text else None
+    )
 
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
     # 2. MT-to-PE post-editing effort metrics
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
 
     results["mt_pe_cosine_similarity"] = cosine_similarity(
         raw_mt,
@@ -329,11 +508,12 @@ def compare_postedit_with_raw_mt(
     results["mt_pe_unchanged_ratio"] = edit_ops["unchanged_ratio"]
     results["mt_pe_changed_ratio_original"] = edit_ops["changed_ratio_original"]
 
-    # These are not true quality metrics because raw MT is being used
-    # as the comparison text. They measure overlap/change from MT to PE.
+    # MT-PE overlap metrics.
+    # These measure similarity/change between PE and raw MT,
+    # not true translation quality.
     mt_pe_overlap_scores = reference_based_scores(
-        post_edited_text,
-        raw_mt,
+        candidate_text=post_edited_text,
+        reference_text=raw_mt,
     )
 
     results["mt_pe_overlap_bleu"] = mt_pe_overlap_scores.get("bleu")
@@ -341,7 +521,6 @@ def compare_postedit_with_raw_mt(
     results["mt_pe_overlap_ter"] = mt_pe_overlap_scores.get("ter")
 
     # Backward-compatible aliases.
-    # Keep these if older parts of your app expect these column names.
     results["mt_pe_bleu"] = results["mt_pe_overlap_bleu"]
     results["mt_pe_chrf"] = results["mt_pe_overlap_chrf"]
     results["mt_pe_ter"] = results["mt_pe_overlap_ter"]
@@ -355,10 +534,9 @@ def compare_postedit_with_raw_mt(
     else:
         results["mt_pe_bertscore_f1"] = None
 
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
     # 3. Reference-based quality metrics
-    # ---------------------------------------------------------
-    # These are quality-oriented only if reference_text is independent.
+    # --------------------------------------------------------
 
     if reference_text:
         add_reference_based_quality_scores(
@@ -402,34 +580,23 @@ def compare_postedit_with_raw_mt(
             results["ht_quality_comet"] = None
 
     else:
-        results["raw_mt_quality_bleu"] = None
-        results["raw_mt_quality_chrf"] = None
-        results["raw_mt_quality_ter"] = None
-        results["raw_mt_quality_bertscore_f1"] = None
-        results["raw_mt_quality_comet"] = None
+        for prefix in ["raw_mt_quality", "pe_quality", "ht_quality"]:
+            results[f"{prefix}_bleu"] = None
+            results[f"{prefix}_chrf"] = None
+            results[f"{prefix}_ter"] = None
+            results[f"{prefix}_bertscore_f1"] = None
+            results[f"{prefix}_comet"] = None
 
-        results["pe_quality_bleu"] = None
-        results["pe_quality_chrf"] = None
-        results["pe_quality_ter"] = None
-        results["pe_quality_bertscore_f1"] = None
-        results["pe_quality_comet"] = None
-
-        results["ht_quality_bleu"] = None
-        results["ht_quality_chrf"] = None
-        results["ht_quality_ter"] = None
-        results["ht_quality_bertscore_f1"] = None
-        results["ht_quality_comet"] = None
-
-    # ---------------------------------------------------------
-    # 4. Teacher score and feedback
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # 4. Teacher assessment
+    # --------------------------------------------------------
 
     results["teacher_score"] = teacher_score
     results["teacher_feedback"] = teacher_feedback if teacher_feedback else None
 
-    # ---------------------------------------------------------
-    # 5. Interpretation of MT-to-PE effort
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # 5. Interpretation
+    # --------------------------------------------------------
 
     interpretation = []
 
@@ -482,7 +649,7 @@ def compare_postedit_with_raw_mt(
         )
     else:
         interpretation.append(
-            "No independent reference was provided, so BLEU, chrF, TER, BERTScore, and COMET quality scores are unavailable."
+            "No independent reference was provided, so reference-based quality metrics are unavailable."
         )
 
     if teacher_score is not None:
@@ -495,11 +662,15 @@ def compare_postedit_with_raw_mt(
     return results
 
 
+# ============================================================
+# Lightweight compatibility function
+# ============================================================
+
 def compare_mt_pe(mt_output, post_edited_text):
     """
-    Lightweight compatibility function.
+    Lightweight MT-PE comparison.
 
-    Use this when you only need simple MT-PE descriptive metrics.
+    Use this if you only need simple descriptive metrics.
     """
 
     mt_output = safe_text(mt_output)
@@ -522,4 +693,71 @@ def compare_mt_pe(mt_output, post_edited_text):
         "unchanged_words": edit_ops["unchanged_words"],
         "unchanged_ratio": edit_ops["unchanged_ratio"],
         "changed_ratio_original": edit_ops["changed_ratio_original"],
+    }
+
+
+# ============================================================
+# Supabase helper
+# ============================================================
+
+def build_research_metrics_payload(results, research_mode=True):
+    """
+    Converts results dictionary into fields ready to save in Supabase.
+
+    Use this in your app when building the submission dictionary.
+    """
+
+    return {
+        "research_mode": research_mode,
+        "advanced_metrics_status": "pending" if research_mode else "not_required",
+
+        "raw_mt_word_count": results.get("raw_mt_word_count"),
+        "ht_word_count": results.get("ht_word_count"),
+        "pe_word_count": results.get("pe_word_count"),
+        "reference_word_count": results.get("reference_word_count"),
+        "mt_pe_word_count_difference": results.get("mt_pe_word_count_difference"),
+
+        "mt_pe_cosine_similarity": results.get("mt_pe_cosine_similarity"),
+        "mt_pe_edit_distance_ratio": results.get("mt_pe_edit_distance_ratio"),
+        "mt_pe_length_ratio": results.get("mt_pe_length_ratio"),
+        "mt_pe_lexical_similarity": results.get("mt_pe_lexical_similarity"),
+        "mt_pe_change_ratio": results.get("mt_pe_change_ratio"),
+
+        "mt_pe_inserted_words": results.get("mt_pe_inserted_words"),
+        "mt_pe_deleted_words": results.get("mt_pe_deleted_words"),
+        "mt_pe_replaced_words": results.get("mt_pe_replaced_words"),
+        "mt_pe_replacement_output_words": results.get("mt_pe_replacement_output_words"),
+        "mt_pe_unchanged_words": results.get("mt_pe_unchanged_words"),
+        "mt_pe_changed_original_words": results.get("mt_pe_changed_original_words"),
+        "mt_pe_unchanged_ratio": results.get("mt_pe_unchanged_ratio"),
+        "mt_pe_changed_ratio_original": results.get("mt_pe_changed_ratio_original"),
+
+        "mt_pe_overlap_bleu": results.get("mt_pe_overlap_bleu"),
+        "mt_pe_overlap_chrf": results.get("mt_pe_overlap_chrf"),
+        "mt_pe_overlap_ter": results.get("mt_pe_overlap_ter"),
+
+        "raw_mt_quality_bleu": results.get("raw_mt_quality_bleu"),
+        "raw_mt_quality_chrf": results.get("raw_mt_quality_chrf"),
+        "raw_mt_quality_ter": results.get("raw_mt_quality_ter"),
+
+        "pe_quality_bleu": results.get("pe_quality_bleu"),
+        "pe_quality_chrf": results.get("pe_quality_chrf"),
+        "pe_quality_ter": results.get("pe_quality_ter"),
+
+        "ht_quality_bleu": results.get("ht_quality_bleu"),
+        "ht_quality_chrf": results.get("ht_quality_chrf"),
+        "ht_quality_ter": results.get("ht_quality_ter"),
+
+        "teacher_score": results.get("teacher_score"),
+        "teacher_feedback": results.get("teacher_feedback"),
+
+        "raw_mt_quality_bertscore_f1": results.get("raw_mt_quality_bertscore_f1"),
+        "pe_quality_bertscore_f1": results.get("pe_quality_bertscore_f1"),
+        "ht_quality_bertscore_f1": results.get("ht_quality_bertscore_f1"),
+
+        "raw_mt_quality_comet": results.get("raw_mt_quality_comet"),
+        "pe_quality_comet": results.get("pe_quality_comet"),
+        "ht_quality_comet": results.get("ht_quality_comet"),
+
+        "mt_pe_interpretation": results.get("mt_pe_interpretation"),
     }
