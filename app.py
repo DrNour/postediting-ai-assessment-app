@@ -187,8 +187,52 @@ def load_submissions():
         st.code(str(error))
         return pd.DataFrame()
 
+def clean_value_for_supabase(value):
+    """
+    Converts values that Supabase/PostgREST may reject.
+    """
+    try:
+        if value is None:
+            return None
+
+        if isinstance(value, float):
+            if math.isnan(value) or math.isinf(value):
+                return None
+            return value
+
+        # Handles pandas/numpy missing values
+        if pd.isna(value):
+            return None
+
+        return value
+
+    except Exception:
+        return value
+
+
 def save_submission(submission):
-    return supabase.table("submissions").insert(submission).execute()
+    """
+    Saves a student submission and shows the real Supabase error if insertion fails.
+    """
+
+    clean_submission = {
+        key: clean_value_for_supabase(value)
+        for key, value in submission.items()
+    }
+
+    try:
+        return supabase.table("submissions").insert(clean_submission).execute()
+
+    except Exception as error:
+        st.error("Could not save the submission to Supabase.")
+
+        st.write("These are the columns the app is trying to send:")
+        st.json(sorted(list(clean_submission.keys())))
+
+        st.write("This is the full Supabase error:")
+        st.code(str(error))
+
+        st.stop()
 
 
 def update_submission_review(submission_id, teacher_score, teacher_feedback):
