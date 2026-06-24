@@ -10,6 +10,7 @@ import streamlit as st
 from docx import Document
 from docx.shared import RGBColor
 from supabase import create_client
+from metrics import compare_postedit_with_raw_mt, build_research_metrics_payload
 
 
 # ============================================================
@@ -687,6 +688,21 @@ def create_submission_docx(submission):
         ("PE-reference chrF", submission.get("pe_reference_chrf")),
         ("PE-reference TER", submission.get("pe_reference_ter")),
         ("PE-reference BERTScore F1", submission.get("pe_reference_bertscore_f1")),
+        ("Research mode", submission.get("research_mode")),
+        ("Advanced metrics status", submission.get("advanced_metrics_status")),
+        ("Raw MT quality BLEU", submission.get("raw_mt_quality_bleu")),
+        ("Raw MT quality chrF", submission.get("raw_mt_quality_chrf")),
+        ("Raw MT quality TER", submission.get("raw_mt_quality_ter")),
+        ("PE quality BLEU", submission.get("pe_quality_bleu")),
+        ("PE quality chrF", submission.get("pe_quality_chrf")),
+        ("PE quality TER", submission.get("pe_quality_ter")),
+        ("HT quality BLEU", submission.get("ht_quality_bleu")),
+        ("HT quality chrF", submission.get("ht_quality_chrf")),
+        ("HT quality TER", submission.get("ht_quality_ter")),
+        ("Raw MT quality COMET", submission.get("raw_mt_quality_comet")),
+        ("PE quality COMET", submission.get("pe_quality_comet")),
+        ("HT quality COMET", submission.get("ht_quality_comet")),
+        ("MT-PE interpretation", submission.get("mt_pe_interpretation")),
         ("Quality warnings", submission.get("quality_warnings")),
     ]
 
@@ -1032,6 +1048,21 @@ def student_assignment_page():
 
     st.markdown("### Metric Settings")
 
+    research_mode = st.toggle(
+        "Research mode",
+        value=True,
+        help="Stores full research data and marks advanced neural metrics as pending.",
+    )
+
+    run_advanced_now = st.toggle(
+        "Run advanced metrics now",
+        value=False,
+        help=(
+            "Leave this off during live classes. BERTScore and COMET can be "
+            "calculated later in batch for research analysis."
+        ),
+    )
+
     use_semantic_cosine = st.checkbox(
         "Use semantic cosine similarity",
         value=False,
@@ -1136,6 +1167,19 @@ def student_assignment_page():
                 pe_word_count,
             )
 
+            research_results = compare_postedit_with_raw_mt(
+                raw_mt=raw_mt,
+                post_edited_text=student_answer,
+                human_translation=None,
+                reference_text=reference_translation,
+                source_text=selected_assignment.get("source_text", ""),
+                teacher_score=None,
+                teacher_feedback="",
+                use_bert=run_advanced_now and use_bert,
+                bert_language=bert_language,
+                comet_scorer=None,
+            )
+
             submission = {
                 "assignment_id": selected_assignment.get("assignment_id"),
                 "assignment_title": selected_assignment.get("title"),
@@ -1159,6 +1203,13 @@ def student_assignment_page():
 
             submission.update(mt_pe_metrics)
             submission.update(reference_metrics)
+
+            submission.update(
+                build_research_metrics_payload(
+                    research_results,
+                    research_mode=research_mode,
+                )
+            )
 
             save_submission(submission)
 
@@ -1227,6 +1278,10 @@ def teacher_submissions_page():
         "pe_reference_cosine_similarity",
         "pe_reference_chrf",
         "pe_reference_ter",
+        "research_mode",
+        "advanced_metrics_status",
+        "pe_quality_chrf",
+        "pe_quality_ter",
         "quality_warnings",
         "teacher_score",
     ]
@@ -1277,6 +1332,36 @@ def teacher_submissions_page():
         "pe_reference_chrf",
         "pe_reference_ter",
         "pe_reference_bertscore_f1",
+        "research_mode",
+        "advanced_metrics_status",
+        "raw_mt_word_count",
+        "reference_word_count",
+        "mt_pe_word_count_difference",
+        "mt_pe_lexical_similarity",
+        "mt_pe_change_ratio",
+        "mt_pe_replacement_output_words",
+        "mt_pe_changed_original_words",
+        "mt_pe_unchanged_ratio",
+        "mt_pe_changed_ratio_original",
+        "mt_pe_overlap_bleu",
+        "mt_pe_overlap_chrf",
+        "mt_pe_overlap_ter",
+        "raw_mt_quality_bleu",
+        "raw_mt_quality_chrf",
+        "raw_mt_quality_ter",
+        "pe_quality_bleu",
+        "pe_quality_chrf",
+        "pe_quality_ter",
+        "ht_quality_bleu",
+        "ht_quality_chrf",
+        "ht_quality_ter",
+        "raw_mt_quality_bertscore_f1",
+        "pe_quality_bertscore_f1",
+        "ht_quality_bertscore_f1",
+        "raw_mt_quality_comet",
+        "pe_quality_comet",
+        "ht_quality_comet",
+        "mt_pe_interpretation",
         "quality_warnings",
         "teacher_score",
         "teacher_feedback",
@@ -1389,6 +1474,24 @@ def teacher_submissions_page():
         "pe_reference_chrf",
         "pe_reference_ter",
         "pe_reference_bertscore_f1",
+        "research_mode",
+        "advanced_metrics_status",
+        "raw_mt_quality_bleu",
+        "raw_mt_quality_chrf",
+        "raw_mt_quality_ter",
+        "pe_quality_bleu",
+        "pe_quality_chrf",
+        "pe_quality_ter",
+        "ht_quality_bleu",
+        "ht_quality_chrf",
+        "ht_quality_ter",
+        "raw_mt_quality_bertscore_f1",
+        "pe_quality_bertscore_f1",
+        "ht_quality_bertscore_f1",
+        "raw_mt_quality_comet",
+        "pe_quality_comet",
+        "ht_quality_comet",
+        "mt_pe_interpretation",
         "quality_warnings",
     ]
 
@@ -1517,8 +1620,10 @@ The core principle is: **AI suggests. Teacher decides.**
 - chrF
 - TER
 - Optional BERTScore
+- Research-ready COMET fields for later batch scoring
 - Word counts
 - Inserted, deleted, replaced, and unchanged words
+- Reference-based MT/PE/HT quality fields
 - Teacher score and teacher feedback
 """
     )
