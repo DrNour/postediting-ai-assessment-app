@@ -454,6 +454,7 @@ if st.button("Save Submission"):
             "machine_translation": raw_mt,
             "reference_translation": reference_translation,
             "post_edited_text": post_edited_text,
+            "student_reflection": student_reflection,
             "editing_time_seconds": editing_time_seconds,
             "group_name": group_name,
             "semester": semester,
