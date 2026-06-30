@@ -16,3 +16,4 @@ bert-score
 python-Levenshtein
 python-docx
 openpyxl
+numpy
