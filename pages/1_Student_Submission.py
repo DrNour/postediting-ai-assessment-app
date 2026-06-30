@@ -442,7 +442,8 @@ if st.button("Save Submission"):
         # Calculate metrics using instructor-controlled settings
         # ----------------------------------------------------
 
-        results = compare_postedit_with_raw_mt(
+        
+     results = compare_postedit_with_raw_mt(
             raw_mt=raw_mt,
             post_edited_text=post_edited_text,
             human_translation=None,
@@ -451,6 +452,14 @@ if st.button("Save Submission"):
             teacher_score=None,
             teacher_feedback="",
 
+            use_bert=(
+            metric_settings["use_bert"]
+            and metric_settings["run_advanced_metrics_now"]
+                ),
+            bert_language=metric_settings["bert_language"],
+
+            comet_scorer=None,
+            )
             # Students cannot control these values.
             use_bert=INSTRUCTOR_METRIC_SETTINGS["use_bert"],
             bert_language=INSTRUCTOR_METRIC_SETTINGS["bert_language"],
