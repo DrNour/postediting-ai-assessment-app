@@ -15,8 +15,30 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("Teacher Review of AI Feedback")
-st.write("Approve, edit, or reject AI-generated draft feedback.")
+st.title("Teacher Review and Metric Controls")
+st.write("Control research metrics and approve, edit, or reject AI-generated draft feedback.")
+
+
+# ============================================================
+# Teacher-only access gate
+# ============================================================
+
+configured_password = st.secrets.get("TEACHER_PASSWORD", None)
+
+if not configured_password:
+    st.error(
+        "TEACHER_PASSWORD is not configured. Add it to Streamlit Secrets before using this page."
+    )
+    st.stop()
+
+teacher_password = st.sidebar.text_input(
+    "Teacher password",
+    type="password",
+)
+
+if teacher_password != configured_password:
+    st.warning("This page is restricted to the instructor.")
+    st.stop()
 
 
 # ============================================================
@@ -41,6 +63,27 @@ supabase = get_supabase_client()
 
 
 # ============================================================
+# Defaults
+# ============================================================
+
+DEFAULT_METRIC_SETTINGS = {
+    "research_mode": True,
+    "run_advanced_metrics_now": False,
+
+    "show_student_metrics": True,
+    "show_editing_summary": True,
+    "show_mt_pe_overlap_metrics": True,
+    "show_reference_quality_metrics": True,
+    "show_automated_interpretation": True,
+
+    "use_bert": False,
+    "bert_language": "en",
+    "use_comet": False,
+    "use_llm_judge": False,
+}
+
+
+# ============================================================
 # Helper functions
 # ============================================================
 
@@ -51,10 +94,6 @@ def safe_text(value):
 
 
 def parse_json_value(value):
-    """
-    Supabase jsonb may come back as dict/list already.
-    Sometimes older saved values may come back as strings.
-    """
     if value is None:
         return None
 
@@ -84,10 +123,63 @@ def clean_value_for_supabase(value):
         return value
 
 
+def load_metric_settings():
+    settings = DEFAULT_METRIC_SETTINGS.copy()
+
+    try:
+        response = (
+            supabase.table("app_metric_settings")
+            .select("*")
+            .eq("id", "default")
+            .single()
+            .execute()
+        )
+
+        if response.data:
+            settings.update(response.data)
+
+    except Exception:
+        st.warning(
+            "Could not load metric settings. Make sure the app_metric_settings table exists."
+        )
+
+    return settings
+
+
+def save_metric_settings(settings):
+    payload = {
+        "id": "default",
+        "research_mode": settings["research_mode"],
+        "run_advanced_metrics_now": settings["run_advanced_metrics_now"],
+
+        "show_student_metrics": settings["show_student_metrics"],
+        "show_editing_summary": settings["show_editing_summary"],
+        "show_mt_pe_overlap_metrics": settings["show_mt_pe_overlap_metrics"],
+        "show_reference_quality_metrics": settings["show_reference_quality_metrics"],
+        "show_automated_interpretation": settings["show_automated_interpretation"],
+
+        "use_bert": settings["use_bert"],
+        "bert_language": settings["bert_language"],
+        "use_comet": settings["use_comet"],
+        "use_llm_judge": settings["use_llm_judge"],
+    }
+
+    clean_payload = {
+        key: clean_value_for_supabase(value)
+        for key, value in payload.items()
+    }
+
+    try:
+        supabase.table("app_metric_settings").upsert(clean_payload).execute()
+        st.success("Metric settings saved successfully.")
+
+    except Exception as error:
+        st.error("Could not save metric settings.")
+        st.write("Run the SQL table-creation code first in Supabase.")
+        st.code(str(error))
+
+
 def load_ai_feedback():
-    """
-    Loads saved AI feedback from Supabase.
-    """
     try:
         response = (
             supabase.table("ai_feedback")
@@ -105,9 +197,6 @@ def load_ai_feedback():
 
 
 def load_submissions():
-    """
-    Loads student submissions from Supabase.
-    """
     try:
         response = (
             supabase.table("submissions")
@@ -125,11 +214,6 @@ def load_submissions():
 
 
 def load_feedback_with_submissions():
-    """
-    Merges AI feedback with student submissions so the teacher can see
-    source text, MT output, and post-edited text.
-    """
-
     feedback_df = load_ai_feedback()
     submissions_df = load_submissions()
 
@@ -158,10 +242,6 @@ def load_feedback_with_submissions():
 
 
 def save_teacher_review(review):
-    """
-    Saves the teacher review in ai_feedback_reviews and updates ai_feedback status.
-    """
-
     clean_review = {
         key: clean_value_for_supabase(value)
         for key, value in review.items()
@@ -190,9 +270,6 @@ def save_teacher_review(review):
 
 
 def load_teacher_reviews():
-    """
-    Loads saved teacher reviews.
-    """
     try:
         response = (
             supabase.table("ai_feedback_reviews")
@@ -208,13 +285,145 @@ def load_teacher_reviews():
 
 
 # ============================================================
-# Load data
+# Metric controls
 # ============================================================
+
+st.header("Research Mode and Metric Controls")
+
+metric_settings = load_metric_settings()
+
+with st.form("metric_settings_form"):
+
+    st.subheader("Research mode")
+
+    research_mode = st.toggle(
+        "Activate research mode",
+        value=bool(metric_settings.get("research_mode", True)),
+        help="When on, submissions are saved with research-ready metric fields.",
+    )
+
+    run_advanced_metrics_now = st.toggle(
+        "Run advanced metrics during student submission",
+        value=bool(metric_settings.get("run_advanced_metrics_now", False)),
+        help=(
+            "For normal class use, keep this off. "
+            "For research testing, turn it on after installing required packages."
+        ),
+    )
+
+    st.subheader("Student-visible feedback")
+
+    show_student_metrics = st.checkbox(
+        "Show feedback and metrics to students",
+        value=bool(metric_settings.get("show_student_metrics", True)),
+    )
+
+    show_editing_summary = st.checkbox(
+        "Show post-editing effort metrics",
+        value=bool(metric_settings.get("show_editing_summary", True)),
+    )
+
+    show_mt_pe_overlap_metrics = st.checkbox(
+        "Show MT–post-edit overlap metrics",
+        value=bool(metric_settings.get("show_mt_pe_overlap_metrics", True)),
+    )
+
+    show_reference_quality_metrics = st.checkbox(
+        "Show reference-based quality metrics",
+        value=bool(metric_settings.get("show_reference_quality_metrics", True)),
+    )
+
+    show_automated_interpretation = st.checkbox(
+        "Show automated interpretation",
+        value=bool(metric_settings.get("show_automated_interpretation", True)),
+    )
+
+    st.subheader("Advanced metric activation")
+
+    use_bert = st.checkbox(
+        "Calculate BERTScore",
+        value=bool(metric_settings.get("use_bert", False)),
+        help="Requires bert-score to be installed.",
+    )
+
+    languages = ["en", "ar", "fr", "de", "es", "zh", "ja", "ko", "tr", "ru"]
+    current_language = metric_settings.get("bert_language", "en")
+
+    if current_language not in languages:
+        current_language = "en"
+
+    bert_language = st.selectbox(
+        "BERTScore language",
+        languages,
+        index=languages.index(current_language),
+    )
+
+    use_comet = st.checkbox(
+        "Calculate COMET",
+        value=bool(metric_settings.get("use_comet", False)),
+        help="The toggle is saved, but COMET also needs a scorer implementation.",
+    )
+
+    use_llm_judge = st.checkbox(
+        "Use LLM judge",
+        value=bool(metric_settings.get("use_llm_judge", False)),
+        help="The toggle is saved, but LLM scoring needs a separate function.",
+    )
+
+    activate_all = st.checkbox(
+        "Activate all available research settings",
+        value=False,
+        help="Turns on research mode, student feedback, BERTScore, COMET, and LLM flags.",
+    )
+
+    submitted_settings = st.form_submit_button("Save Metric Settings")
+
+    if submitted_settings:
+
+        if activate_all:
+            research_mode = True
+            run_advanced_metrics_now = True
+            show_student_metrics = True
+            show_editing_summary = True
+            show_mt_pe_overlap_metrics = True
+            show_reference_quality_metrics = True
+            show_automated_interpretation = True
+            use_bert = True
+            use_comet = True
+            use_llm_judge = True
+
+        new_settings = {
+            "research_mode": research_mode,
+            "run_advanced_metrics_now": run_advanced_metrics_now,
+
+            "show_student_metrics": show_student_metrics,
+            "show_editing_summary": show_editing_summary,
+            "show_mt_pe_overlap_metrics": show_mt_pe_overlap_metrics,
+            "show_reference_quality_metrics": show_reference_quality_metrics,
+            "show_automated_interpretation": show_automated_interpretation,
+
+            "use_bert": use_bert,
+            "bert_language": bert_language,
+            "use_comet": use_comet,
+            "use_llm_judge": use_llm_judge,
+        }
+
+        save_metric_settings(new_settings)
+
+
+st.divider()
+
+
+# ============================================================
+# Load AI feedback data
+# ============================================================
+
+st.header("Teacher Review of AI Feedback")
 
 ai_df = load_feedback_with_submissions()
 
 if ai_df.empty:
-    st.warning("No AI feedback has been saved yet.")
+    st.info("No AI feedback has been saved yet. Metric controls above are still available.")
     st.stop()
 
 
@@ -271,16 +480,28 @@ st.markdown("### Submission Metadata")
 meta_col1, meta_col2, meta_col3 = st.columns(3)
 
 with meta_col1:
-    st.write(f"**Student ID:** {safe_text(selected_row.get('student_id_feedback') or selected_row.get('student_id'))}")
-    st.write(f"**Student Name:** {safe_text(selected_row.get('student_name_feedback') or selected_row.get('student_name'))}")
+    st.write(
+        f"**Student ID:** "
+        f"{safe_text(selected_row.get('student_id_feedback') or selected_row.get('student_id'))}"
+    )
+    st.write(
+        f"**Student Name:** "
+        f"{safe_text(selected_row.get('student_name_feedback') or selected_row.get('student_name'))}"
+    )
 
 with meta_col2:
-    st.write(f"**Assignment:** {safe_text(selected_row.get('assignment_title_feedback') or selected_row.get('assignment_title'))}")
+    st.write(
+        f"**Assignment:** "
+        f"{safe_text(selected_row.get('assignment_title_feedback') or selected_row.get('assignment_title'))}"
+    )
     st.write(f"**Submission ID:** {safe_text(selected_row.get('submission_id'))}")
 
 with meta_col3:
     st.write(f"**Model:** {safe_text(selected_row.get('model_name'))}")
-    st.write(f"**Feedback created at:** {safe_text(selected_row.get('created_at_feedback') or selected_row.get('created_at'))}")
+    st.write(
+        f"**Feedback created at:** "
+        f"{safe_text(selected_row.get('created_at_feedback') or selected_row.get('created_at'))}"
+    )
 
 
 # ============================================================
@@ -416,77 +637,7 @@ if st.button("Save Teacher Review"):
 
     st.success("Teacher review saved successfully.")
 
-def load_metric_settings():
-    """
-    Loads instructor-controlled metric settings from Supabase.
-    """
-    default_settings = {
-        "research_mode": True,
-        "run_advanced_metrics_now": False,
 
-        "show_student_metrics": True,
-        "show_editing_summary": True,
-        "show_mt_pe_overlap_metrics": True,
-        "show_reference_quality_metrics": True,
-        "show_automated_interpretation": True,
-
-        "use_semantic_cosine": True,
-        "use_bert": False,
-        "bert_language": "en",
-        "use_comet": False,
-        "use_llm_judge": False,
-    }
-
-    try:
-        response = (
-            supabase.table("app_metric_settings")
-            .select("*")
-            .eq("id", "default")
-            .single()
-            .execute()
-        )
-
-        if response.data:
-            default_settings.update(response.data)
-
-        return default_settings
-
-    except Exception as error:
-        st.warning("Could not load metric settings. Using default settings.")
-        st.code(str(error))
-        return default_settings
-
-
-def save_metric_settings(settings):
-    """
-    Saves instructor-controlled metric settings to Supabase.
-    """
-
-    payload = {
-        "id": "default",
-        "research_mode": settings["research_mode"],
-        "run_advanced_metrics_now": settings["run_advanced_metrics_now"],
-
-        "show_student_metrics": settings["show_student_metrics"],
-        "show_editing_summary": settings["show_editing_summary"],
-        "show_mt_pe_overlap_metrics": settings["show_mt_pe_overlap_metrics"],
-        "show_reference_quality_metrics": settings["show_reference_quality_metrics"],
-        "show_automated_interpretation": settings["show_automated_interpretation"],
-
-        "use_semantic_cosine": settings["use_semantic_cosine"],
-        "use_bert": settings["use_bert"],
-        "bert_language": settings["bert_language"],
-        "use_comet": settings["use_comet"],
-        "use_llm_judge": settings["use_llm_judge"],
-    }
-
-    try:
-        supabase.table("app_metric_settings").upsert(payload).execute()
-        st.success("Metric settings saved successfully.")
-
-    except Exception as error:
-        st.error("Could not save metric settings.")
-        st.code(str(error))
 # ============================================================
 # Saved reviews
 # ============================================================
