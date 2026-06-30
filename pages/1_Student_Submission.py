@@ -388,6 +388,15 @@ post_edited_text = st.text_area(
     height=120,
 )
 
+student_reflection = st.text_area(
+    "Reflection / Comment (optional)",
+    placeholder=(
+        "Briefly explain the main change you made and why, "
+        "or describe any difficulty you noticed."
+    ),
+    height=100,
+)
+
 editing_time_seconds = st.number_input(
     "Editing Time in Seconds",
     min_value=0.0,
