@@ -416,7 +416,77 @@ if st.button("Save Teacher Review"):
 
     st.success("Teacher review saved successfully.")
 
+def load_metric_settings():
+    """
+    Loads instructor-controlled metric settings from Supabase.
+    """
+    default_settings = {
+        "research_mode": True,
+        "run_advanced_metrics_now": False,
 
+        "show_student_metrics": True,
+        "show_editing_summary": True,
+        "show_mt_pe_overlap_metrics": True,
+        "show_reference_quality_metrics": True,
+        "show_automated_interpretation": True,
+
+        "use_semantic_cosine": True,
+        "use_bert": False,
+        "bert_language": "en",
+        "use_comet": False,
+        "use_llm_judge": False,
+    }
+
+    try:
+        response = (
+            supabase.table("app_metric_settings")
+            .select("*")
+            .eq("id", "default")
+            .single()
+            .execute()
+        )
+
+        if response.data:
+            default_settings.update(response.data)
+
+        return default_settings
+
+    except Exception as error:
+        st.warning("Could not load metric settings. Using default settings.")
+        st.code(str(error))
+        return default_settings
+
+
+def save_metric_settings(settings):
+    """
+    Saves instructor-controlled metric settings to Supabase.
+    """
+
+    payload = {
+        "id": "default",
+        "research_mode": settings["research_mode"],
+        "run_advanced_metrics_now": settings["run_advanced_metrics_now"],
+
+        "show_student_metrics": settings["show_student_metrics"],
+        "show_editing_summary": settings["show_editing_summary"],
+        "show_mt_pe_overlap_metrics": settings["show_mt_pe_overlap_metrics"],
+        "show_reference_quality_metrics": settings["show_reference_quality_metrics"],
+        "show_automated_interpretation": settings["show_automated_interpretation"],
+
+        "use_semantic_cosine": settings["use_semantic_cosine"],
+        "use_bert": settings["use_bert"],
+        "bert_language": settings["bert_language"],
+        "use_comet": settings["use_comet"],
+        "use_llm_judge": settings["use_llm_judge"],
+    }
+
+    try:
+        supabase.table("app_metric_settings").upsert(payload).execute()
+        st.success("Metric settings saved successfully.")
+
+    except Exception as error:
+        st.error("Could not save metric settings.")
+        st.code(str(error))
 # ============================================================
 # Saved reviews
 # ============================================================
