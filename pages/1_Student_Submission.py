@@ -16,71 +16,7 @@ st.set_page_config(
 )
 
 st.title("Manual Student Submission")
-st.write("Manually save a student's post-edited translation to Supabase.")
-
-def load_metric_settings():
-    """
-    Loads instructor-controlled metric settings from Supabase.
-    Students cannot change these settings.
-    """
-
-    default_settings = {
-        "research_mode": True,
-        "run_advanced_metrics_now": False,
-
-        "show_student_metrics": True,
-        "show_editing_summary": True,
-        "show_mt_pe_overlap_metrics": True,
-        "show_reference_quality_metrics": True,
-        "show_automated_interpretation": True,
-
-        "use_semantic_cosine": True,
-        "use_bert": False,
-        "bert_language": "en",
-        "use_comet": False,
-        "use_llm_judge": False,
-    }
-
-    try:
-        response = (
-            supabase.table("app_metric_settings")
-            .select("*")
-            .eq("id", "default")
-            .single()
-            .execute()
-        )
-
-        if response.data:
-            default_settings.update(response.data)
-
-        return default_settings
-
-    except Exception:
-        return default_settings
-# ============================================================
-# Instructor-controlled metric settings
-# Students can SEE feedback and metrics, but they cannot change
-# which metrics are calculated.
-# ============================================================
-
-INSTRUCTOR_METRIC_SETTINGS = {
-    # Save research-ready fields to Supabase
-    "research_mode": True,
-
-    # Student-visible feedback sections
-    "show_student_metrics": True,
-    "show_editing_summary": True,
-    "show_mt_pe_overlap_metrics": True,
-    "show_reference_quality_metrics": True,
-    "show_automated_interpretation": True,
-
-    # Advanced optional metrics
-    # Keep these False for normal class use.
-    # Change to True later when you want research/article mode.
-    "use_bert": False,
-    "bert_language": "en",
-    "use_comet": False,
-}
+st.write("Students submit post-edited translations. Metrics are controlled by the instructor.")
 
 
 # ============================================================
@@ -105,7 +41,29 @@ supabase = get_supabase_client()
 
 
 # ============================================================
-# Helpers
+# Default metric settings
+# Used if Supabase settings table is missing or unavailable.
+# ============================================================
+
+DEFAULT_METRIC_SETTINGS = {
+    "research_mode": True,
+    "run_advanced_metrics_now": False,
+
+    "show_student_metrics": True,
+    "show_editing_summary": True,
+    "show_mt_pe_overlap_metrics": True,
+    "show_reference_quality_metrics": True,
+    "show_automated_interpretation": True,
+
+    "use_bert": False,
+    "bert_language": "en",
+    "use_comet": False,
+    "use_llm_judge": False,
+}
+
+
+# ============================================================
+# Helper functions
 # ============================================================
 
 def safe_text(value):
@@ -128,6 +86,43 @@ def clean_value_for_supabase(value):
         return value
 
 
+def format_metric(value, digits=3):
+    if value is None:
+        return "N/A"
+
+    try:
+        return round(float(value), digits)
+    except Exception:
+        return value
+
+
+def load_metric_settings():
+    """
+    Loads instructor-controlled metric settings from Supabase.
+    Students cannot change these settings.
+    """
+
+    settings = DEFAULT_METRIC_SETTINGS.copy()
+
+    try:
+        response = (
+            supabase.table("app_metric_settings")
+            .select("*")
+            .eq("id", "default")
+            .single()
+            .execute()
+        )
+
+        if response.data:
+            settings.update(response.data)
+
+    except Exception:
+        # Do not break student submission if the settings table is unavailable.
+        pass
+
+    return settings
+
+
 def save_submission(submission):
     clean_submission = {
         key: clean_value_for_supabase(value)
@@ -146,38 +141,22 @@ def save_submission(submission):
         st.stop()
 
 
-def format_metric(value, digits=3):
-    """
-    Safely formats numeric metric values for Streamlit display.
-    """
-    if value is None:
-        return "N/A"
-
-    try:
-        return round(float(value), digits)
-    except Exception:
-        return value
-
-
 def display_student_feedback_and_metrics(results, settings):
     """
-    Displays feedback and metrics to students.
-
-    Students can see these results, but they cannot control which
-    metrics are calculated. The instructor controls that through
-    INSTRUCTOR_METRIC_SETTINGS.
+    Shows students the instructor-approved metrics.
+    Students can view results but cannot control which metrics are calculated.
     """
 
-    if not settings["show_student_metrics"]:
+    if not settings.get("show_student_metrics", True):
         return
 
     st.header("Feedback and Metrics")
 
     # --------------------------------------------------------
-    # 1. Post-editing effort summary
+    # Post-editing effort
     # --------------------------------------------------------
 
-    if settings["show_editing_summary"]:
+    if settings.get("show_editing_summary", True):
         st.subheader("Post-editing effort")
 
         col1, col2, col3 = st.columns(3)
@@ -241,10 +220,10 @@ def display_student_feedback_and_metrics(results, settings):
             )
 
     # --------------------------------------------------------
-    # 2. MT-to-post-edit overlap metrics
+    # MT-post-edit overlap
     # --------------------------------------------------------
 
-    if settings["show_mt_pe_overlap_metrics"]:
+    if settings.get("show_mt_pe_overlap_metrics", True):
         st.subheader("MT–post-edit overlap")
 
         col1, col2, col3 = st.columns(3)
@@ -273,10 +252,10 @@ def display_student_feedback_and_metrics(results, settings):
         )
 
     # --------------------------------------------------------
-    # 3. Reference-based quality metrics
+    # Reference-based quality
     # --------------------------------------------------------
 
-    if settings["show_reference_quality_metrics"]:
+    if settings.get("show_reference_quality_metrics", True):
         st.subheader("Reference-based quality")
 
         col1, col2, col3 = st.columns(3)
@@ -300,15 +279,14 @@ def display_student_feedback_and_metrics(results, settings):
             )
 
         st.caption(
-            "These metrics are quality-oriented only when an independent reference "
-            "translation is available."
+            "These metrics are quality-oriented only when an independent reference translation is available."
         )
 
     # --------------------------------------------------------
-    # 4. Advanced metrics
+    # Advanced metrics
     # --------------------------------------------------------
 
-    if settings["use_bert"]:
+    if settings.get("use_bert", False) and settings.get("run_advanced_metrics_now", False):
         st.subheader("Advanced metrics")
 
         col1, col2, col3 = st.columns(3)
@@ -332,15 +310,22 @@ def display_student_feedback_and_metrics(results, settings):
             )
 
     # --------------------------------------------------------
-    # 5. Automated interpretation
+    # Automated interpretation
     # --------------------------------------------------------
 
-    if settings["show_automated_interpretation"]:
+    if settings.get("show_automated_interpretation", True):
         interpretation = results.get("mt_pe_interpretation")
 
         if interpretation:
             st.subheader("Automated interpretation")
             st.info(interpretation)
+
+
+# ============================================================
+# Load instructor metric settings
+# ============================================================
+
+metric_settings = load_metric_settings()
 
 
 # ============================================================
@@ -410,12 +395,6 @@ editing_time_seconds = st.number_input(
 )
 
 
-# ============================================================
-# Instructor note
-# This is informational only. Students cannot change settings.
-# You may remove this expander if you do not want students to see it.
-# ============================================================
-
 with st.expander("Metric information", expanded=False):
     st.write(
         "Metrics are calculated automatically after submission. "
@@ -438,12 +417,13 @@ if st.button("Save Submission"):
 
     with st.spinner("Calculating metrics and saving submission..."):
 
-        # ----------------------------------------------------
-        # Calculate metrics using instructor-controlled settings
-        # ----------------------------------------------------
+        use_bert_now = (
+            metric_settings.get("research_mode", True)
+            and metric_settings.get("run_advanced_metrics_now", False)
+            and metric_settings.get("use_bert", False)
+        )
 
-        
-     results = compare_postedit_with_raw_mt(
+        results = compare_postedit_with_raw_mt(
             raw_mt=raw_mt,
             post_edited_text=post_edited_text,
             human_translation=None,
@@ -451,24 +431,10 @@ if st.button("Save Submission"):
             source_text=source_text,
             teacher_score=None,
             teacher_feedback="",
-
-            use_bert=(
-            metric_settings["use_bert"]
-            and metric_settings["run_advanced_metrics_now"]
-                ),
-            bert_language=metric_settings["bert_language"],
-
-            comet_scorer=None,
-            )
-            # Students cannot control these values.
-            use_bert=INSTRUCTOR_METRIC_SETTINGS["use_bert"],
-            bert_language=INSTRUCTOR_METRIC_SETTINGS["bert_language"],
+            use_bert=use_bert_now,
+            bert_language=metric_settings.get("bert_language", "en"),
             comet_scorer=None,
         )
-
-        # ----------------------------------------------------
-        # Build base submission payload
-        # ----------------------------------------------------
 
         submission = {
             "assignment_id": assignment_id,
@@ -489,30 +455,18 @@ if st.button("Save Submission"):
             "teacher_feedback": "",
         }
 
-        # ----------------------------------------------------
-        # Add research metrics payload
-        # ----------------------------------------------------
-
         submission.update(
             build_research_metrics_payload(
                 results,
-                research_mode=INSTRUCTOR_METRIC_SETTINGS["research_mode"],
+                research_mode=metric_settings.get("research_mode", True),
             )
         )
-
-        # ----------------------------------------------------
-        # Save to Supabase
-        # ----------------------------------------------------
 
         save_submission(submission)
 
     st.success("Submission saved successfully to Supabase.")
 
-    # --------------------------------------------------------
-    # Show feedback and metrics to students after saving
-    # --------------------------------------------------------
-
     display_student_feedback_and_metrics(
         results,
-        INSTRUCTOR_METRIC_SETTINGS,
+        metric_settings,
     )
