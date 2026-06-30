@@ -18,7 +18,45 @@ st.set_page_config(
 st.title("Manual Student Submission")
 st.write("Manually save a student's post-edited translation to Supabase.")
 
+def load_metric_settings():
+    """
+    Loads instructor-controlled metric settings from Supabase.
+    Students cannot change these settings.
+    """
 
+    default_settings = {
+        "research_mode": True,
+        "run_advanced_metrics_now": False,
+
+        "show_student_metrics": True,
+        "show_editing_summary": True,
+        "show_mt_pe_overlap_metrics": True,
+        "show_reference_quality_metrics": True,
+        "show_automated_interpretation": True,
+
+        "use_semantic_cosine": True,
+        "use_bert": False,
+        "bert_language": "en",
+        "use_comet": False,
+        "use_llm_judge": False,
+    }
+
+    try:
+        response = (
+            supabase.table("app_metric_settings")
+            .select("*")
+            .eq("id", "default")
+            .single()
+            .execute()
+        )
+
+        if response.data:
+            default_settings.update(response.data)
+
+        return default_settings
+
+    except Exception:
+        return default_settings
 # ============================================================
 # Instructor-controlled metric settings
 # Students can SEE feedback and metrics, but they cannot change
