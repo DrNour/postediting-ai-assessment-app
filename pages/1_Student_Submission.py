@@ -435,9 +435,9 @@ if st.button("Save Submission"):
             bert_language=metric_settings.get("bert_language", "en"),
             comet_scorer=None,
         )
-
         submission = {
-            "assignment_id": assignment_id,
+            "assignment_code": assignment_id,
+            "task_id": assignment_id,
             "assignment_title": assignment_title,
             "student_id": student_id,
             "student_name": student_name,
@@ -452,8 +452,7 @@ if st.button("Save Submission"):
             "source_language": source_language,
             "target_language": target_language,
             "teacher_score": None,
-            "teacher_feedback": "",
-        }
+            "teacher_feedback": "", }
 
         submission.update(
             build_research_metrics_payload(
