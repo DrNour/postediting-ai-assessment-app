@@ -5,22 +5,19 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
+from modules.auth import require_teacher_access
+from modules.task_mode import POST_EDITING, TRANSLATION, normalize_task_type, task_type_label
 
-# ============================================================
-# Page configuration
-# ============================================================
-
-st.set_page_config(
-    page_title="Research Evaluation",
-    page_icon="📈",
-    layout="wide",
-)
 
 st.title("Research Evaluation and Export")
 st.write(
     "Prepare research-ready evaluation data from student submissions, "
     "teacher annotations, AI feedback, and teacher review decisions."
 )
+
+
+if not require_teacher_access("evaluation"):
+    st.stop()
 
 
 # ============================================================
@@ -455,6 +452,58 @@ if eval_df.empty:
     st.warning("No evaluation data available yet.")
     st.stop()
 
+# Legacy records were post-editing tasks before task_type was introduced.
+eval_df = eval_df.copy()
+if "task_type" not in eval_df.columns:
+    eval_df["task_type"] = POST_EDITING
+eval_df["task_type"] = eval_df["task_type"].apply(normalize_task_type)
+eval_df["task_label"] = eval_df["task_type"].apply(task_type_label)
+
+st.subheader("Filter Evaluation Data")
+filter_col1, filter_col2 = st.columns(2)
+with filter_col1:
+    assignment_values = (
+        sorted(eval_df["assignment_title"].dropna().astype(str).unique().tolist())
+        if "assignment_title" in eval_df.columns
+        else []
+    )
+    selected_assignment = st.selectbox(
+        "Assignment",
+        ["All assignments"] + assignment_values,
+        key="evaluation_assignment_filter",
+    )
+with filter_col2:
+    selected_task = st.selectbox(
+        "Task type",
+        ["All task types", "Translation", "Post-editing"],
+        key="evaluation_task_filter",
+    )
+
+if selected_assignment != "All assignments":
+    eval_df = eval_df[
+        eval_df["assignment_title"].astype(str) == selected_assignment
+    ].copy()
+
+if selected_task != "All task types":
+    wanted_task = TRANSLATION if selected_task == "Translation" else POST_EDITING
+    eval_df = eval_df[eval_df["task_type"] == wanted_task].copy()
+
+if eval_df.empty:
+    st.warning("No evaluation records match the selected filters.")
+    st.stop()
+
+# Keep the workbook sheets aligned with the filtered evaluation records.
+if "submission_id" in eval_df.columns:
+    visible_submission_ids = set(eval_df["submission_id"].astype(str))
+    for table_df in [submissions_df, annotations_df, ai_feedback_df, ai_reviews_df]:
+        if not table_df.empty and "submission_id" in table_df.columns:
+            table_df.drop(
+                table_df.index[
+                    ~table_df["submission_id"].astype(str).isin(visible_submission_ids)
+                ],
+                inplace=True,
+            )
+
 
 # ============================================================
 # Dataset overview
@@ -489,6 +538,8 @@ preferred_columns = [
     "submission_id",
     "assignment_id",
     "assignment_title",
+    "task_type",
+    "task_label",
     "student_id",
     "student_name",
     "source_text",
@@ -571,7 +622,7 @@ csv_data = display_df.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     label="Download Evaluation Dataset as CSV",
     data=csv_data,
-    file_name="postediting_evaluation_dataset.csv",
+    file_name="translation_postediting_evaluation_dataset.csv",
     mime="text/csv",
 )
 
@@ -597,7 +648,7 @@ excel_output.seek(0)
 st.download_button(
     label="Download Full Research Workbook as Excel",
     data=excel_output,
-    file_name="postediting_research_workbook.xlsx",
+    file_name="translation_postediting_research_workbook.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
@@ -729,19 +780,22 @@ st.markdown(
     """
 You can use the exported workbook for:
 
-1. **Post-editing effort analysis**  
-   Edit-distance ratio, cosine similarity, lexical change ratio, inserted/deleted/replaced/unchanged words.
+1. **Task-mode comparisons**  
+   Compare independent translation and post-editing records using `task_type`.
 
-2. **Reference-based quality analysis**  
+2. **Post-editing effort analysis**  
+   For post-editing records only: edit-distance ratio, cosine similarity, lexical change ratio, and edit operations.
+
+3. **Reference-based quality analysis**  
    BLEU, chrF, TER, optional BERTScore, optional COMET.
 
-3. **Teacher annotation analysis**  
+4. **Teacher annotation analysis**  
    Error category, subcategory, severity, comments, and suggested revisions.
 
-4. **AI-feedback evaluation**  
+5. **AI-feedback evaluation**  
    AI risk level, AI-generated categories, teacher review status, and usefulness ratings.
 
-5. **AI-teacher agreement analysis**  
+6. **AI-teacher agreement analysis**  
    Cohen's kappa and classification-report style summaries where comparable labels exist.
 """
 )

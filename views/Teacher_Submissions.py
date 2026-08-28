@@ -1,0 +1,3 @@
+from workflow_pages import teacher_submissions_page
+
+teacher_submissions_page()

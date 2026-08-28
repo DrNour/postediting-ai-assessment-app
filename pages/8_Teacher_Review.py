@@ -4,16 +4,15 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
+from modules.auth import require_teacher_access
 
-# ============================================================
-# Page configuration
-# ============================================================
-
-st.set_page_config(
-    page_title="Teacher Review",
-    page_icon="✅",
-    layout="wide",
+from modules.task_mode import (
+    is_translation,
+    normalize_task_type,
+    student_output_label,
+    task_type_label,
 )
+
 
 st.title("Teacher Review and Metric Controls")
 st.write("Control research metrics and approve, edit, or reject AI-generated draft feedback.")
@@ -23,21 +22,7 @@ st.write("Control research metrics and approve, edit, or reject AI-generated dra
 # Teacher-only access gate
 # ============================================================
 
-configured_password = st.secrets.get("TEACHER_PASSWORD", None)
-
-if not configured_password:
-    st.error(
-        "TEACHER_PASSWORD is not configured. Add it to Streamlit Secrets before using this page."
-    )
-    st.stop()
-
-teacher_password = st.sidebar.text_input(
-    "Teacher password",
-    type="password",
-)
-
-if teacher_password != configured_password:
-    st.warning("This page is restricted to the instructor.")
+if not require_teacher_access("teacher_review"):
     st.stop()
 
 
@@ -454,25 +439,35 @@ selected_row = selected_df.iloc[0].to_dict()
 
 
 # ============================================================
-# Translation submission
+# Student submission
 # ============================================================
 
 st.divider()
-st.subheader("Translation Submission")
+selected_task_type = normalize_task_type(
+    selected_row.get("task_type_submission") or selected_row.get("task_type")
+)
+output_label = student_output_label(selected_task_type)
+st.subheader(f"{task_type_label(selected_task_type)} Submission")
 
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.markdown("**Source Text**")
-    st.write(safe_text(selected_row.get("source_text")))
-
-with col2:
-    st.markdown("**Machine Translation**")
-    st.write(safe_text(selected_row.get("machine_translation")))
-
-with col3:
-    st.markdown("**Post-Edited Text**")
-    st.write(safe_text(selected_row.get("post_edited_text")))
+if is_translation(selected_task_type):
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Source Text**")
+        st.write(safe_text(selected_row.get("source_text")))
+    with col2:
+        st.markdown(f"**{output_label}**")
+        st.write(safe_text(selected_row.get("post_edited_text")))
+else:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**Source Text**")
+        st.write(safe_text(selected_row.get("source_text")))
+    with col2:
+        st.markdown("**Machine Translation**")
+        st.write(safe_text(selected_row.get("machine_translation")))
+    with col3:
+        st.markdown(f"**{output_label}**")
+        st.write(safe_text(selected_row.get("post_edited_text")))
 
 
 st.markdown("### Submission Metadata")
@@ -495,6 +490,7 @@ with meta_col2:
         f"{safe_text(selected_row.get('assignment_title_feedback') or selected_row.get('assignment_title'))}"
     )
     st.write(f"**Submission ID:** {safe_text(selected_row.get('submission_id'))}")
+    st.write(f"**Task type:** {task_type_label(selected_task_type)}")
 
 with meta_col3:
     st.write(f"**Model:** {safe_text(selected_row.get('model_name'))}")

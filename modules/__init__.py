@@ -1,1 +1,1 @@
-# Modules for the AI-assisted post-editing assessment app.
+"""Shared modules for EduApp translation and post-editing assessment."""

@@ -8,6 +8,9 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
+from modules.auth import require_teacher_access
+from modules.task_mode import POST_EDITING, normalize_task_type, task_type_label
+
 try:
     from scipy import stats
     import statsmodels.api as sm
@@ -46,16 +49,6 @@ except Exception as import_error:
     ANALYTICS_IMPORT_ERROR = import_error
 
 
-# ============================================================
-# Page configuration
-# ============================================================
-
-st.set_page_config(
-    page_title="Research Analytics",
-    page_icon="📊",
-    layout="wide",
-)
-
 st.title("Research Analytics")
 st.write(
     "Run statistical, machine-learning, and reproducibility-oriented analyses "
@@ -67,29 +60,7 @@ st.write(
 # Teacher-only access gate
 # ============================================================
 
-configured_password = st.secrets.get("TEACHER_PASSWORD", None)
-
-if not configured_password:
-    st.error(
-        "TEACHER_PASSWORD is not configured. Add it to Streamlit Secrets before using this page."
-    )
-    st.stop()
-
-teacher_password = st.sidebar.text_input(
-    "Teacher password",
-    type="password",
-)
-
-if teacher_password != configured_password:
-    st.warning("This page is restricted to the instructor.")
-    st.stop()
-
-
-if not ANALYTICS_LIBS_AVAILABLE:
-    st.error("Some required analytics packages are missing.")
-    st.code(str(ANALYTICS_IMPORT_ERROR))
-    st.write("Add these to requirements.txt:")
-    st.code("scipy\nstatsmodels\nscikit-learn\nnumpy")
+if not require_teacher_access("research_analytics"):
     st.stop()
 
 
@@ -155,6 +126,13 @@ raw_df = load_submissions()
 if raw_df.empty:
     st.warning("No submissions found.")
     st.stop()
+
+raw_df = raw_df.copy()
+if "task_type" not in raw_df.columns:
+    # Legacy records pre-date the two-mode workflow and were post-editing tasks.
+    raw_df["task_type"] = POST_EDITING
+raw_df["task_type"] = raw_df["task_type"].apply(normalize_task_type)
+raw_df["task_label"] = raw_df["task_type"].apply(task_type_label)
 
 
 # ============================================================
@@ -436,6 +414,7 @@ st.sidebar.header("Filters")
 filtered_df = df.copy()
 
 candidate_filter_columns = [
+    "task_label",
     "semester",
     "group_name",
     "assignment_title",
@@ -526,6 +505,22 @@ with tabs[0]:
             )
         else:
             st.metric("Unique students", "N/A")
+
+    if "task_type" in filtered_df.columns:
+        task_counts = (
+            filtered_df["task_type"]
+            .apply(task_type_label)
+            .value_counts()
+            .rename_axis("task_type")
+            .reset_index(name="records")
+        )
+        st.markdown("**Records by task type**")
+        st.dataframe(task_counts, use_container_width=True, hide_index=True)
+        if task_counts.shape[0] > 1:
+            st.info(
+                "The filtered dataset mixes translation and post-editing tasks. "
+                "Use the task_type filter before analysing MT–PE effort variables."
+            )
 
     st.subheader("Available numeric variables")
     st.write(numeric_columns)
@@ -1692,6 +1687,7 @@ with tabs[10]:
             col for col in [
                 "student_id",
                 "student_name",
+                "task_type",
                 "assignment_code",
                 "task_id",
                 "assignment_title",

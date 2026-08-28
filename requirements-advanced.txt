@@ -1,0 +1,4 @@
+# Optional neural metrics. Install only when BERTScore or semantic similarity is needed.
+-r requirements.txt
+sentence-transformers>=3,<6
+bert-score>=0.3.13,<1

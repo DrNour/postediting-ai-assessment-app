@@ -4,8 +4,16 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
+from modules.auth import require_teacher_access
+
 from modules.ai_feedback import check_feedback_risk, generate_ai_feedback
 from metrics import compare_mt_pe
+from modules.task_mode import (
+    is_translation,
+    normalize_task_type,
+    student_output_label,
+    task_type_label,
+)
 
 try:
     from modules.similarity import semantic_similarity
@@ -13,22 +21,16 @@ except Exception:
     semantic_similarity = None
 
 
-# ============================================================
-# Page configuration
-# ============================================================
-
-st.set_page_config(
-    page_title="AI Feedback",
-    page_icon="💬",
-    layout="wide",
-)
-
 st.title("AI Feedback Generator")
-st.write("Generate draft AI feedback for a post-edited translation. Teacher review is required.")
+st.write("Generate draft AI feedback for a translation or post-editing submission. Teacher review is required.")
 
 st.warning(
     "AI-generated feedback is a draft and must be reviewed by a teacher before assessment use."
 )
+
+
+if not require_teacher_access("ai_feedback"):
+    st.stop()
 
 
 # ============================================================
@@ -184,6 +186,7 @@ for _, row in submissions.iterrows():
         f"{safe_text(row.get('student_id'))} — "
         f"{safe_text(row.get('student_name'))} — "
         f"{safe_text(row.get('assignment_title'))} — "
+        f"{task_type_label(row.get('task_type'))} — "
         f"ID {safe_text(row.get('submission_id'))}"
     )
     submission_labels.append(label)
@@ -212,19 +215,21 @@ submission = selected_df.iloc[0].to_dict()
 
 st.subheader("Submission Details")
 
-col1, col2, col3 = st.columns(3)
+task_type = normalize_task_type(submission.get("task_type"))
+output_label = student_output_label(task_type)
+st.write(f"**Task type:** {task_type_label(task_type)}")
 
+col1, col2 = st.columns(2)
 with col1:
     st.markdown("**Source Text**")
     st.write(safe_text(submission.get("source_text")))
-
 with col2:
+    st.markdown(f"**{output_label}**")
+    st.write(safe_text(submission.get("post_edited_text")))
+
+if not is_translation(task_type):
     st.markdown("**Machine Translation**")
     st.write(safe_text(submission.get("machine_translation")))
-
-with col3:
-    st.markdown("**Post-Edited Text**")
-    st.write(safe_text(submission.get("post_edited_text")))
 
 
 # ============================================================
@@ -234,38 +239,56 @@ with col3:
 st.divider()
 st.subheader("Automatic Metrics")
 
-metrics = compare_mt_pe(
-    submission.get("machine_translation"),
-    submission.get("post_edited_text"),
-)
-
-st.json(metrics)
+if is_translation(task_type):
+    metrics = {
+        "output_word_count": len(safe_text(submission.get("post_edited_text")).split()),
+        "lexical_similarity": None,
+        "change_ratio": None,
+    }
+    st.info("MT–PE effort metrics are not applicable to an independent translation task.")
+else:
+    metrics = compare_mt_pe(
+        submission.get("machine_translation"),
+        submission.get("post_edited_text"),
+    )
+    st.json(metrics)
 
 mt_pe_semantic = None
 source_pe_semantic = None
 
-if semantic_similarity is not None:
-    with st.spinner("Calculating semantic similarity..."):
-        mt_pe_semantic = semantic_similarity(
-            safe_text(submission.get("machine_translation")),
-            safe_text(submission.get("post_edited_text")),
-        )
+calculate_semantic = st.checkbox(
+    "Calculate semantic similarity now",
+    value=False,
+    help=(
+        "This loads a multilingual sentence-transformer model and can be slow on "
+        "the first run. Leave it off when you only need AI feedback."
+    ),
+)
 
-        source_pe_semantic = semantic_similarity(
-            safe_text(submission.get("source_text")),
-            safe_text(submission.get("post_edited_text")),
-        )
+if calculate_semantic:
+    if semantic_similarity is None:
+        st.info("Semantic similarity module is not available.")
+    else:
+        with st.spinner("Loading the semantic model and calculating similarity..."):
+            if not is_translation(task_type):
+                mt_pe_semantic = semantic_similarity(
+                    safe_text(submission.get("machine_translation")),
+                    safe_text(submission.get("post_edited_text")),
+                )
 
-    col4, col5 = st.columns(2)
+            source_pe_semantic = semantic_similarity(
+                safe_text(submission.get("source_text")),
+                safe_text(submission.get("post_edited_text")),
+            )
 
-    with col4:
-        st.metric("MT vs PE Semantic Similarity", mt_pe_semantic)
-
-    with col5:
-        st.metric("Source vs PE Semantic Similarity", source_pe_semantic)
-
-else:
-    st.info("Semantic similarity module not available.")
+        if not is_translation(task_type):
+            col4, col5 = st.columns(2)
+            with col4:
+                st.metric("MT vs PE Semantic Similarity", mt_pe_semantic)
+            with col5:
+                st.metric("Source vs Output Semantic Similarity", source_pe_semantic)
+        else:
+            st.metric("Source vs Translation Semantic Similarity", source_pe_semantic)
 
 
 # ============================================================
@@ -285,19 +308,25 @@ editing_time_seconds = submission.get("editing_time_seconds")
 if editing_time_seconds is None:
     editing_time_seconds = 0
 
-if st.button("Generate AI Feedback"):
-    with st.spinner("Generating AI feedback..."):
-        result = generate_ai_feedback(
-            source_text=safe_text(submission.get("source_text")),
-            mt_output=safe_text(submission.get("machine_translation")),
-            post_edited_text=safe_text(submission.get("post_edited_text")),
-            editing_time_seconds=editing_time_seconds,
-            lexical_similarity=metrics.get("lexical_similarity"),
-            change_ratio=metrics.get("change_ratio"),
-            mt_pe_semantic_similarity=mt_pe_semantic,
-            source_pe_semantic_similarity=source_pe_semantic,
-            model_name=model_name,
-        )
+if st.button("Generate AI Feedback", type="primary"):
+    try:
+        with st.spinner("Generating AI feedback..."):
+            result = generate_ai_feedback(
+                source_text=safe_text(submission.get("source_text")),
+                mt_output=safe_text(submission.get("machine_translation")),
+                post_edited_text=safe_text(submission.get("post_edited_text")),
+                editing_time_seconds=editing_time_seconds,
+                lexical_similarity=metrics.get("lexical_similarity"),
+                change_ratio=metrics.get("change_ratio"),
+                mt_pe_semantic_similarity=mt_pe_semantic,
+                source_pe_semantic_similarity=source_pe_semantic,
+                task_type=task_type,
+                model_name=model_name,
+            )
+    except Exception as error:
+        st.error("AI feedback could not be generated.")
+        st.code(str(error))
+        result = {"success": False, "error": str(error), "raw_output": ""}
 
     if result["success"]:
         feedback = result["feedback"]

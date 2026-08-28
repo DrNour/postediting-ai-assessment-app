@@ -2,21 +2,23 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
+from modules.auth import require_teacher_access
+
 from modules.taxonomy import ERROR_TAXONOMY, SEVERITY_LEVELS
-
-
-# ============================================================
-# Page configuration
-# ============================================================
-
-st.set_page_config(
-    page_title="Teacher Annotation",
-    page_icon="📝",
-    layout="wide",
+from modules.task_mode import (
+    is_translation,
+    normalize_task_type,
+    student_output_label,
+    task_type_label,
 )
+
 
 st.title("Teacher Annotation")
 st.write("Annotate translation errors using a structured taxonomy.")
+
+
+if not require_teacher_access("teacher_annotation"):
+    st.stop()
 
 
 # ============================================================
@@ -144,6 +146,7 @@ for _, row in submissions.iterrows():
         f"{safe_text(row.get('student_id'))} — "
         f"{safe_text(row.get('student_name'))} — "
         f"{safe_text(row.get('assignment_title'))} — "
+        f"{task_type_label(row.get('task_type'))} — "
         f"ID {safe_text(row.get('submission_id'))}"
     )
     submission_labels.append(label)
@@ -189,6 +192,11 @@ with col2:
     st.markdown("**Submitted At**")
     st.write(safe_text(submission.get("submitted_at")))
 
+    st.markdown("**Task Type**")
+    st.write(task_type_label(submission.get("task_type")))
+
+
+task_type = normalize_task_type(submission.get("task_type"))
 
 st.markdown("### Source Text")
 st.text_area(
@@ -198,13 +206,15 @@ st.text_area(
     disabled=True,
 )
 
-st.markdown("### Raw Machine Translation")
-st.text_area(
-    "Raw MT",
-    value=safe_text(submission.get("machine_translation")),
-    height=180,
-    disabled=True,
-)
+if not is_translation(task_type):
+    st.markdown("### Raw Machine Translation")
+    st.text_area(
+        "Raw MT",
+        value=safe_text(submission.get("machine_translation")),
+        height=180,
+        disabled=True,
+        label_visibility="collapsed",
+    )
 
 if safe_text(submission.get("reference_translation")):
     st.markdown("### Reference Translation")
@@ -215,12 +225,14 @@ if safe_text(submission.get("reference_translation")):
         disabled=True,
     )
 
-st.markdown("### Student Post-Edited Text")
+output_label = student_output_label(task_type)
+st.markdown(f"### {output_label}")
 st.text_area(
-    "Post-edited text",
+    output_label,
     value=safe_text(submission.get("post_edited_text")),
     height=250,
     disabled=True,
+    label_visibility="collapsed",
 )
 
 

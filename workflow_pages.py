@@ -1,0 +1,1666 @@
+import io
+import zipfile
+import difflib
+import html
+import math
+from collections import Counter
+
+import pandas as pd
+import streamlit as st
+from docx import Document
+from docx.shared import RGBColor
+from supabase import create_client
+from metrics import compare_postedit_with_raw_mt, build_research_metrics_payload
+from modules.auth import require_teacher_access
+from modules.task_mode import (
+    POST_EDITING,
+    POST_EDITING_ONLY_METRIC_FIELDS,
+    TRANSLATION,
+    TASK_OPTIONS,
+    is_translation,
+    make_translation_metrics_task_appropriate,
+    normalize_task_type,
+    student_output_label,
+    task_instruction,
+    task_type_label,
+)
+
+
+# ============================================================
+# Supabase connection
+# ============================================================
+
+@st.cache_resource
+def get_supabase_client():
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception:
+        st.error(
+            "Supabase is not configured. Add SUPABASE_URL and SUPABASE_KEY "
+            "to Streamlit Secrets."
+        )
+        st.stop()
+
+
+
+# ============================================================
+# Supabase storage functions
+# ============================================================
+
+def load_assignments():
+    try:
+        response = (
+            get_supabase_client().table("assignments")
+            .select("*")
+            .order("created_at", desc=True)
+            .execute()
+        )
+
+        return pd.DataFrame(response.data or [])
+
+    except Exception as error:
+        st.error("Could not read the assignments table from Supabase.")
+        st.info(
+            "Check that the table named 'assignments' exists in the public schema "
+            "and that Row Level Security is disabled or policies allow SELECT access."
+        )
+        st.code(str(error))
+        return pd.DataFrame()
+
+
+def save_assignment(assignment):
+    try:
+        return get_supabase_client().table("assignments").insert(assignment).execute()
+
+    except Exception as error:
+        st.error("Could not save the assignment to Supabase.")
+        st.write("The assignment data being sent was:")
+        st.json(assignment)
+        st.write("Supabase error:")
+        st.code(str(error))
+        st.stop()
+
+
+def load_submissions():
+    try:
+        response = (
+            get_supabase_client().table("submissions")
+            .select("*")
+            .order("submitted_at", desc=True)
+            .execute()
+        )
+
+        return pd.DataFrame(response.data or [])
+
+    except Exception as error:
+        st.error("Could not read the submissions table from Supabase.")
+        st.info(
+            "Check that the table named 'submissions' exists in the public schema "
+            "and that Row Level Security is disabled or policies allow SELECT access."
+        )
+        st.code(str(error))
+        return pd.DataFrame()
+
+def clean_value_for_supabase(value):
+    """
+    Converts values that Supabase/PostgREST may reject.
+    """
+    try:
+        if value is None:
+            return None
+
+        if isinstance(value, float):
+            if math.isnan(value) or math.isinf(value):
+                return None
+            return value
+
+        # Handles pandas/numpy missing values
+        if pd.isna(value):
+            return None
+
+        return value
+
+    except Exception:
+        return value
+
+
+def save_submission(submission):
+    """
+    Saves a student submission and shows the real Supabase error if insertion fails.
+    """
+
+    clean_submission = {
+        key: clean_value_for_supabase(value)
+        for key, value in submission.items()
+    }
+
+    try:
+        return get_supabase_client().table("submissions").insert(clean_submission).execute()
+
+    except Exception as error:
+        st.error("Could not save the submission to Supabase.")
+
+        error_text = str(error)
+        if "task_type" in error_text.lower():
+            st.warning(
+                "Your submissions table does not yet have the task_type column. "
+                "Run supabase/migrations/001_add_task_type.sql once in the Supabase SQL Editor."
+            )
+
+        st.write("These are the columns the app is trying to send:")
+        st.json(sorted(list(clean_submission.keys())))
+
+        st.write("This is the full Supabase error:")
+        st.code(error_text)
+
+        st.stop()
+
+
+def update_submission_review(submission_id, teacher_score, teacher_feedback):
+    return (
+        get_supabase_client().table("submissions")
+        .update(
+            {
+                "teacher_score": teacher_score,
+                "teacher_feedback": teacher_feedback,
+            }
+        )
+        .eq("submission_id", submission_id)
+        .execute()
+    )
+
+
+# ============================================================
+# Text and metric helpers
+# ============================================================
+
+def safe_text(text):
+    if text is None:
+        return ""
+
+    if isinstance(text, float) and math.isnan(text):
+        return ""
+
+    return str(text).strip()
+
+
+def word_count(text):
+    text = safe_text(text)
+
+    if not text:
+        return 0
+
+    return len(text.split())
+
+
+def lexical_cosine_similarity(text_a, text_b):
+    words_a = safe_text(text_a).lower().split()
+    words_b = safe_text(text_b).lower().split()
+
+    if not words_a or not words_b:
+        return None
+
+    counter_a = Counter(words_a)
+    counter_b = Counter(words_b)
+
+    common_words = set(counter_a.keys()) & set(counter_b.keys())
+
+    numerator = sum(counter_a[word] * counter_b[word] for word in common_words)
+
+    sum_a = sum(value ** 2 for value in counter_a.values())
+    sum_b = sum(value ** 2 for value in counter_b.values())
+
+    denominator = math.sqrt(sum_a) * math.sqrt(sum_b)
+
+    if denominator == 0:
+        return None
+
+    return round(numerator / denominator, 4)
+
+
+@st.cache_resource
+def load_sentence_transformer_model():
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        return SentenceTransformer(
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        )
+    except Exception:
+        return None
+
+
+def semantic_cosine_similarity(text_a, text_b):
+    text_a = safe_text(text_a)
+    text_b = safe_text(text_b)
+
+    if not text_a or not text_b:
+        return None
+
+    model = load_sentence_transformer_model()
+
+    if model is None:
+        return lexical_cosine_similarity(text_a, text_b)
+
+    embeddings = model.encode(
+        [text_a, text_b],
+        normalize_embeddings=True,
+    )
+
+    score = float(embeddings[0] @ embeddings[1])
+
+    return round(score, 4)
+
+
+def cosine_similarity(text_a, text_b, use_semantic=False):
+    if use_semantic:
+        return semantic_cosine_similarity(text_a, text_b)
+
+    return lexical_cosine_similarity(text_a, text_b)
+
+
+def edit_distance_ratio(text_a, text_b):
+    text_a = safe_text(text_a)
+    text_b = safe_text(text_b)
+
+    if not text_a and not text_b:
+        return 0.0
+
+    ratio = difflib.SequenceMatcher(None, text_a, text_b).ratio()
+
+    return round(1 - ratio, 4)
+
+
+def length_ratio(candidate, reference):
+    candidate_words = word_count(candidate)
+    reference_words = word_count(reference)
+
+    if reference_words == 0:
+        return None
+
+    return round(candidate_words / reference_words, 3)
+
+
+def reference_based_scores(candidate, reference):
+    candidate = safe_text(candidate)
+    reference = safe_text(reference)
+
+    if not candidate or not reference:
+        return {
+            "bleu": None,
+            "chrf": None,
+            "ter": None,
+        }
+
+    try:
+        from sacrebleu.metrics import BLEU, CHRF, TER
+
+        bleu = BLEU()
+        chrf = CHRF()
+        ter = TER()
+
+        return {
+            "bleu": round(bleu.sentence_score(candidate, [reference]).score, 3),
+            "chrf": round(chrf.sentence_score(candidate, [reference]).score, 3),
+            "ter": round(ter.sentence_score(candidate, [reference]).score, 3),
+        }
+
+    except Exception:
+        return {
+            "bleu": None,
+            "chrf": None,
+            "ter": None,
+        }
+
+
+def compute_bert_score(candidate, reference, language="en"):
+    candidate = safe_text(candidate)
+    reference = safe_text(reference)
+
+    if not candidate or not reference:
+        return None
+
+    try:
+        from bert_score import score
+
+        _, _, f1 = score(
+            [candidate],
+            [reference],
+            lang=language,
+            verbose=False,
+            rescale_with_baseline=False,
+        )
+
+        return round(float(f1[0]), 4)
+
+    except Exception:
+        return None
+
+
+def make_track_changes_html(original_text, edited_text):
+    original_words = safe_text(original_text).split()
+    edited_words = safe_text(edited_text).split()
+
+    matcher = difflib.SequenceMatcher(None, original_words, edited_words)
+
+    output = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for word in original_words[i1:i2]:
+                output.append(
+                    f'<span class="same-word">{html.escape(word)}</span>'
+                )
+
+        elif tag == "delete":
+            for word in original_words[i1:i2]:
+                output.append(
+                    f'<span class="deleted-word">{html.escape(word)}</span>'
+                )
+
+        elif tag == "insert":
+            for word in edited_words[j1:j2]:
+                output.append(
+                    f'<span class="added-word">{html.escape(word)}</span>'
+                )
+
+        elif tag == "replace":
+            for word in original_words[i1:i2]:
+                output.append(
+                    f'<span class="deleted-word">{html.escape(word)}</span>'
+                )
+
+            for word in edited_words[j1:j2]:
+                output.append(
+                    f'<span class="added-word">{html.escape(word)}</span>'
+                )
+
+    return " ".join(output)
+
+
+def calculate_edit_summary(original_text, edited_text):
+    original_words = safe_text(original_text).split()
+    edited_words = safe_text(edited_text).split()
+
+    matcher = difflib.SequenceMatcher(None, original_words, edited_words)
+
+    inserted = 0
+    deleted = 0
+    replaced = 0
+    unchanged = 0
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            unchanged += i2 - i1
+        elif tag == "delete":
+            deleted += i2 - i1
+        elif tag == "insert":
+            inserted += j2 - j1
+        elif tag == "replace":
+            deleted += i2 - i1
+            inserted += j2 - j1
+            replaced += max(i2 - i1, j2 - j1)
+
+    return {
+        "inserted_words": inserted,
+        "deleted_words": deleted,
+        "replaced_segments": replaced,
+        "unchanged_words": unchanged,
+    }
+
+
+def compare_mt_and_postedit(
+    raw_mt,
+    post_edited_text,
+    use_semantic_cosine=False,
+    use_bert=False,
+    bert_language="en",
+):
+    scores = reference_based_scores(post_edited_text, raw_mt)
+
+    cosine_method = (
+        "semantic_sentence_transformer"
+        if use_semantic_cosine
+        else "fast_lexical"
+    )
+
+    return {
+        "mt_pe_cosine_similarity": cosine_similarity(
+            raw_mt,
+            post_edited_text,
+            use_semantic=use_semantic_cosine,
+        ),
+        "mt_pe_cosine_method": cosine_method,
+        "mt_pe_edit_distance_ratio": edit_distance_ratio(
+            raw_mt,
+            post_edited_text,
+        ),
+        "mt_pe_length_ratio": length_ratio(post_edited_text, raw_mt),
+        "mt_pe_bleu": scores["bleu"],
+        "mt_pe_chrf": scores["chrf"],
+        "mt_pe_ter": scores["ter"],
+        "mt_pe_bertscore_f1": compute_bert_score(
+            post_edited_text,
+            raw_mt,
+            language=bert_language,
+        ) if use_bert else None,
+    }
+
+
+def compare_postedit_and_reference(
+    post_edited_text,
+    reference_translation,
+    use_semantic_cosine=False,
+    use_bert=False,
+    bert_language="en",
+):
+    reference_translation = safe_text(reference_translation)
+
+    if not reference_translation:
+        return {
+            "pe_reference_cosine_similarity": None,
+            "pe_reference_cosine_method": "",
+            "pe_reference_length_ratio": None,
+            "pe_reference_bleu": None,
+            "pe_reference_chrf": None,
+            "pe_reference_ter": None,
+            "pe_reference_bertscore_f1": None,
+        }
+
+    scores = reference_based_scores(post_edited_text, reference_translation)
+
+    cosine_method = (
+        "semantic_sentence_transformer"
+        if use_semantic_cosine
+        else "fast_lexical"
+    )
+
+    return {
+        "pe_reference_cosine_similarity": cosine_similarity(
+            post_edited_text,
+            reference_translation,
+            use_semantic=use_semantic_cosine,
+        ),
+        "pe_reference_cosine_method": cosine_method,
+        "pe_reference_length_ratio": length_ratio(
+            post_edited_text,
+            reference_translation,
+        ),
+        "pe_reference_bleu": scores["bleu"],
+        "pe_reference_chrf": scores["chrf"],
+        "pe_reference_ter": scores["ter"],
+        "pe_reference_bertscore_f1": compute_bert_score(
+            post_edited_text,
+            reference_translation,
+            language=bert_language,
+        ) if use_bert else None,
+    }
+
+
+def build_quality_warnings(
+    mt_pe_metrics,
+    reference_metrics,
+    output_word_count,
+    task_type=POST_EDITING,
+):
+    warnings = []
+
+    if output_word_count < 5:
+        noun = "Student translation" if is_translation(task_type) else "Post-edited text"
+        warnings.append(f"{noun} is very short.")
+
+    if not is_translation(task_type):
+        mt_pe_cosine = mt_pe_metrics.get("mt_pe_cosine_similarity")
+        edit_ratio = mt_pe_metrics.get("mt_pe_edit_distance_ratio")
+
+        if mt_pe_cosine is not None and mt_pe_cosine >= 0.95:
+            warnings.append("Post-edited text is extremely close to the raw MT.")
+
+        if edit_ratio is not None and edit_ratio < 0.05:
+            warnings.append("Very little editing detected.")
+
+    reference_cosine = reference_metrics.get("pe_reference_cosine_similarity")
+
+    if reference_cosine is not None and reference_cosine < 0.50:
+        warnings.append("Low similarity with the reference translation.")
+
+    if not warnings:
+        return "No automatic warnings."
+
+    return " | ".join(warnings)
+
+
+def metrics_to_dataframe(metrics):
+    return pd.DataFrame(
+        [{"Metric": key, "Value": value} for key, value in metrics.items()]
+    )
+
+
+# ============================================================
+# Word export helpers
+# ============================================================
+
+def clean_filename(text):
+    text = safe_text(text) or "submission"
+
+    for char in '<>:"/\\|?*':
+        text = text.replace(char, "_")
+
+    return text.replace(" ", "_")[:80]
+
+
+def add_docx_section(document, title, text):
+    document.add_heading(title, level=2)
+    document.add_paragraph(safe_text(text))
+
+
+def add_track_changes_to_docx(document, original_text, edited_text):
+    document.add_heading("Track Changes Style Preview", level=2)
+
+    paragraph = document.add_paragraph()
+
+    original_words = safe_text(original_text).split()
+    edited_words = safe_text(edited_text).split()
+
+    matcher = difflib.SequenceMatcher(None, original_words, edited_words)
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for word in original_words[i1:i2]:
+                run = paragraph.add_run(word + " ")
+                run.font.color.rgb = RGBColor(17, 24, 39)
+
+        elif tag == "delete":
+            for word in original_words[i1:i2]:
+                run = paragraph.add_run(word + " ")
+                run.font.strike = True
+                run.font.color.rgb = RGBColor(153, 27, 27)
+
+        elif tag == "insert":
+            for word in edited_words[j1:j2]:
+                run = paragraph.add_run(word + " ")
+                run.bold = True
+                run.font.color.rgb = RGBColor(6, 95, 70)
+
+        elif tag == "replace":
+            for word in original_words[i1:i2]:
+                run = paragraph.add_run(word + " ")
+                run.font.strike = True
+                run.font.color.rgb = RGBColor(153, 27, 27)
+
+            for word in edited_words[j1:j2]:
+                run = paragraph.add_run(word + " ")
+                run.bold = True
+                run.font.color.rgb = RGBColor(6, 95, 70)
+
+
+def create_submission_docx(submission):
+    document = Document()
+    task_type = normalize_task_type(submission.get("task_type"))
+    output_heading = student_output_label(task_type)
+
+    document.add_heading(f"Student {task_type_label(task_type)} Submission", level=1)
+
+    document.add_heading("Student Information", level=2)
+    document.add_paragraph(f"Student ID: {safe_text(submission.get('student_id'))}")
+    document.add_paragraph(f"Student name: {safe_text(submission.get('student_name'))}")
+    document.add_paragraph(f"Submitted at: {safe_text(submission.get('submitted_at'))}")
+
+    document.add_heading("Assignment Information", level=2)
+    document.add_paragraph(
+        f"Assignment: {safe_text(submission.get('assignment_title'))}"
+    )
+    document.add_paragraph(f"Task type: {task_type_label(task_type)}")
+
+    add_docx_section(document, "Source Text", submission.get("source_text"))
+
+    raw_mt = safe_text(submission.get("machine_translation"))
+    if raw_mt:
+        mt_heading = (
+            "Raw Machine Translation"
+            if not is_translation(task_type)
+            else "Raw Machine Translation (teacher/research record; hidden from student)"
+        )
+        add_docx_section(document, mt_heading, raw_mt)
+
+    add_docx_section(
+        document,
+        "Reference Translation",
+        submission.get("reference_translation"),
+    )
+    add_docx_section(
+        document,
+        output_heading,
+        submission.get("post_edited_text"),
+    )
+
+    if not is_translation(task_type):
+        add_track_changes_to_docx(
+            document,
+            submission.get("machine_translation"),
+            submission.get("post_edited_text"),
+        )
+
+    document.add_heading("Automatic Metrics", level=2)
+
+    common_metrics = [
+        ("Source word count", submission.get("source_word_count")),
+        ("Student-output word count", submission.get("pe_word_count")),
+        (
+            "Output-reference cosine similarity",
+            submission.get("pe_reference_cosine_similarity"),
+        ),
+        ("Output-reference cosine method", submission.get("pe_reference_cosine_method")),
+        ("Output-reference length ratio", submission.get("pe_reference_length_ratio")),
+        ("Output-reference BLEU", submission.get("pe_reference_bleu")),
+        ("Output-reference chrF", submission.get("pe_reference_chrf")),
+        ("Output-reference TER", submission.get("pe_reference_ter")),
+        ("Output-reference BERTScore F1", submission.get("pe_reference_bertscore_f1")),
+        ("Research mode", submission.get("research_mode")),
+        ("Advanced metrics status", submission.get("advanced_metrics_status")),
+        ("Raw MT quality BLEU", submission.get("raw_mt_quality_bleu")),
+        ("Raw MT quality chrF", submission.get("raw_mt_quality_chrf")),
+        ("Raw MT quality TER", submission.get("raw_mt_quality_ter")),
+        ("Student-output quality BLEU", submission.get("pe_quality_bleu")),
+        ("Student-output quality chrF", submission.get("pe_quality_chrf")),
+        ("Student-output quality TER", submission.get("pe_quality_ter")),
+        ("Human-translation quality BLEU", submission.get("ht_quality_bleu")),
+        ("Human-translation quality chrF", submission.get("ht_quality_chrf")),
+        ("Human-translation quality TER", submission.get("ht_quality_ter")),
+        ("Raw MT quality COMET", submission.get("raw_mt_quality_comet")),
+        ("Student-output quality COMET", submission.get("pe_quality_comet")),
+        ("Human-translation quality COMET", submission.get("ht_quality_comet")),
+        ("Automatic interpretation", submission.get("mt_pe_interpretation")),
+        ("Quality warnings", submission.get("quality_warnings")),
+    ]
+
+    post_editing_metrics = [
+        ("Inserted words", submission.get("inserted_words")),
+        ("Deleted words", submission.get("deleted_words")),
+        ("Replaced segments", submission.get("replaced_segments")),
+        ("Unchanged words", submission.get("unchanged_words")),
+        ("MT word count", submission.get("mt_word_count")),
+        ("MT-PE cosine similarity", submission.get("mt_pe_cosine_similarity")),
+        ("MT-PE cosine method", submission.get("mt_pe_cosine_method")),
+        ("MT-PE edit-distance ratio", submission.get("mt_pe_edit_distance_ratio")),
+        ("MT-PE length ratio", submission.get("mt_pe_length_ratio")),
+        ("MT-PE BLEU", submission.get("mt_pe_bleu")),
+        ("MT-PE chrF", submission.get("mt_pe_chrf")),
+        ("MT-PE TER", submission.get("mt_pe_ter")),
+        ("MT-PE BERTScore F1", submission.get("mt_pe_bertscore_f1")),
+    ]
+
+    metrics = common_metrics
+    if not is_translation(task_type):
+        metrics = post_editing_metrics + common_metrics
+
+    table = document.add_table(rows=1, cols=2)
+    table.style = "Table Grid"
+
+    header_cells = table.rows[0].cells
+    header_cells[0].text = "Metric"
+    header_cells[1].text = "Value"
+
+    for metric, value in metrics:
+        row_cells = table.add_row().cells
+        row_cells[0].text = safe_text(metric)
+        row_cells[1].text = safe_text(value)
+
+    document.add_heading("Teacher Review", level=2)
+    document.add_paragraph(
+        f"Teacher score: {safe_text(submission.get('teacher_score'))}"
+    )
+    document.add_paragraph(
+        f"Teacher feedback: {safe_text(submission.get('teacher_feedback'))}"
+    )
+
+    buffer = io.BytesIO()
+    document.save(buffer)
+    buffer.seek(0)
+
+    return buffer
+
+
+def create_zip_of_word_docs(submissions_df):
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for _, row in submissions_df.iterrows():
+            submission = row.to_dict()
+            docx_buffer = create_submission_docx(submission)
+
+            filename = (
+                clean_filename(submission.get("assignment_title"))
+                + "_"
+                + clean_filename(submission.get("student_id"))
+                + "_"
+                + clean_filename(submission.get("student_name"))
+                + ".docx"
+            )
+
+            zip_file.writestr(filename, docx_buffer.getvalue())
+
+    zip_buffer.seek(0)
+
+    return zip_buffer
+
+
+# ============================================================
+# Teacher login
+# ============================================================
+
+def teacher_login(page_key="workflow_teacher"):
+    """Compatibility wrapper around the shared teacher-access gate."""
+    return require_teacher_access(page_key)
+
+
+
+# ============================================================
+# Teacher assignment page
+# ============================================================
+
+def teacher_assignment_page():
+    st.title("Teacher Assignment Creator")
+
+    if not teacher_login("teacher_assignments"):
+        st.info("Enter the teacher password to create assignments.")
+        return
+
+    st.divider()
+
+    st.subheader("Create a New Assignment")
+
+    with st.form("create_assignment_form"):
+        course = st.text_input(
+            "Course name",
+            placeholder="Example: Translation Studies",
+        )
+
+        title = st.text_input(
+            "Assignment title",
+            placeholder="Example: Post-editing Task 1",
+        )
+
+        instructions = st.text_area(
+            "Instructions for students",
+            placeholder="Explain what students should do.",
+            height=120,
+        )
+
+        source_text = st.text_area(
+            "Source text",
+            placeholder="Paste the original text here.",
+            height=180,
+        )
+
+        machine_translation = st.text_area(
+            "Raw machine translation (optional for translation-only assignments)",
+            placeholder=(
+                "Paste the machine-translated text here. Leave blank when students "
+                "should only translate from the source."
+            ),
+            height=180,
+        )
+
+        reference_translation = st.text_area(
+            "Reference translation / model answer",
+            placeholder="Optional but recommended for quality assessment.",
+            height=180,
+        )
+
+        due_date = st.date_input("Due date")
+
+        max_score = st.number_input(
+            "Maximum score",
+            min_value=1.0,
+            max_value=100.0,
+            value=10.0,
+            step=0.5,
+        )
+
+        active = st.checkbox(
+            "Make this assignment visible to students",
+            value=True,
+        )
+
+        submitted = st.form_submit_button("Create Assignment")
+
+        if submitted:
+            if not title.strip():
+                st.error("Please enter an assignment title.")
+            elif not source_text.strip():
+                st.error("Please enter the source text.")
+            else:
+                assignment = {
+                    "course": course.strip(),
+                    "title": title.strip(),
+                    "instructions": instructions.strip(),
+                    "source_text": source_text.strip(),
+                    "machine_translation": machine_translation.strip(),
+                    "reference_translation": reference_translation.strip(),
+                    "due_date": str(due_date),
+                    "max_score": float(max_score),
+                    "active": bool(active),
+                }
+
+                save_assignment(assignment)
+                st.success("Assignment created successfully.")
+                st.rerun()
+
+    st.divider()
+
+    st.subheader("Existing Assignments")
+
+    assignments = load_assignments()
+
+    if assignments.empty:
+        st.info("No assignments created yet.")
+    else:
+        if "machine_translation" in assignments.columns:
+            assignments = assignments.copy()
+            assignments["student_modes"] = assignments["machine_translation"].apply(
+                lambda value: (
+                    "Translation or post-editing"
+                    if safe_text(value)
+                    else "Translation only"
+                )
+            )
+
+        display_columns = [
+            "created_at",
+            "course",
+            "title",
+            "student_modes",
+            "due_date",
+            "max_score",
+            "active",
+        ]
+
+        available_columns = [
+            column for column in display_columns if column in assignments.columns
+        ]
+
+        st.dataframe(
+            assignments[available_columns],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+# ============================================================
+# Student assignment page
+# ============================================================
+
+def student_assignment_page():
+    st.title("Student Assignments")
+    st.write("Choose an assignment, then translate from the source or post-edit the MT output.")
+
+    assignments = load_assignments()
+
+    if assignments.empty:
+        st.info("No assignments are available yet.")
+        return
+
+    if "active" not in assignments.columns:
+        st.info("No active assignments are currently available.")
+        return
+
+    active_mask = (
+        assignments["active"]
+        .fillna(False)
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin({"true", "1", "yes"})
+    )
+    active_assignments = assignments[active_mask]
+
+    if active_assignments.empty:
+        st.info("No active assignments are currently available.")
+        return
+
+    label_to_id = {}
+    for _, row in active_assignments.iterrows():
+        assignment_id = safe_text(row.get("assignment_id"))
+        label = (
+            f"{safe_text(row.get('title')) or 'Untitled'} — "
+            f"due {safe_text(row.get('due_date')) or 'not set'} — ID {assignment_id}"
+        )
+        label_to_id[label] = assignment_id
+
+    selected_label = st.selectbox("Choose an assignment", list(label_to_id))
+    selected_assignment_id = label_to_id[selected_label]
+
+    selected_rows = active_assignments[
+        active_assignments["assignment_id"].astype(str) == str(selected_assignment_id)
+    ]
+    if selected_rows.empty:
+        st.error("The selected assignment could not be loaded.")
+        return
+
+    selected_assignment = selected_rows.iloc[0]
+
+    st.subheader(safe_text(selected_assignment.get("title")) or "Untitled assignment")
+
+    if safe_text(selected_assignment.get("course")):
+        st.write(f"**Course:** {selected_assignment.get('course')}")
+
+    st.write(f"**Due date:** {safe_text(selected_assignment.get('due_date')) or 'Not set'}")
+    st.write(f"**Maximum score:** {selected_assignment.get('max_score')}")
+
+    if safe_text(selected_assignment.get("instructions")):
+        st.markdown("### Instructions")
+        st.write(selected_assignment.get("instructions"))
+
+    source_text = safe_text(selected_assignment.get("source_text"))
+    raw_mt = safe_text(selected_assignment.get("machine_translation"))
+    reference_translation = safe_text(selected_assignment.get("reference_translation"))
+
+    st.markdown("### Source Text")
+    st.text_area(
+        "Source text",
+        source_text,
+        height=180,
+        disabled=True,
+        label_visibility="collapsed",
+    )
+
+    st.markdown("### Student Information")
+    student_col1, student_col2 = st.columns(2)
+    with student_col1:
+        student_id = st.text_input(
+            "Student ID",
+            placeholder="Example: S123456",
+            key=f"student_id_{selected_assignment_id}",
+        )
+    with student_col2:
+        student_name = st.text_input(
+            "Student name",
+            placeholder="Example: Aisha Ahmed",
+            key=f"student_name_{selected_assignment_id}",
+        )
+
+    st.markdown("### Choose the Task Type")
+
+    available_task_labels = list(TASK_OPTIONS)
+    if not raw_mt:
+        available_task_labels = ["Translate from the source text"]
+        st.info(
+            "This assignment has no machine translation, so Translation is the only available mode."
+        )
+
+    selected_task_label = st.radio(
+        "Task type",
+        available_task_labels,
+        horizontal=True,
+        key=f"task_type_{selected_assignment_id}",
+    )
+    task_type = TASK_OPTIONS[selected_task_label]
+    st.info(task_instruction(task_type))
+
+    if is_translation(task_type):
+        answer_key = f"student_translation_{selected_assignment_id}"
+        if answer_key not in st.session_state:
+            st.session_state[answer_key] = ""
+
+        st.markdown("### Your Translation")
+        student_answer = st.text_area(
+            "Translation box",
+            key=answer_key,
+            height=300,
+            placeholder="Write your translation here.",
+            label_visibility="collapsed",
+        )
+        edit_summary = {
+            "inserted_words": None,
+            "deleted_words": None,
+            "replaced_segments": None,
+            "unchanged_words": None,
+        }
+    else:
+        st.markdown("### Raw Machine Translation")
+        st.text_area(
+            "Original raw MT output",
+            raw_mt,
+            height=180,
+            disabled=True,
+            label_visibility="collapsed",
+        )
+
+        answer_key = f"student_post_edit_{selected_assignment_id}"
+        if answer_key not in st.session_state:
+            st.session_state[answer_key] = raw_mt
+
+        st.markdown("### Post-edit the MT Output")
+        student_answer = st.text_area(
+            "Post-editing box",
+            key=answer_key,
+            height=300,
+            label_visibility="collapsed",
+        )
+
+        st.markdown("### Track Changes Preview")
+        track_changes_html = make_track_changes_html(raw_mt, student_answer)
+        st.markdown(
+            f'<div class="track-box">{track_changes_html}</div>',
+            unsafe_allow_html=True,
+        )
+
+        edit_summary = calculate_edit_summary(raw_mt, student_answer)
+        st.markdown("### Editing Summary")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"Edit feature": "Inserted words", "Value": edit_summary["inserted_words"]},
+                    {"Edit feature": "Deleted words", "Value": edit_summary["deleted_words"]},
+                    {"Edit feature": "Replaced segments", "Value": edit_summary["replaced_segments"]},
+                    {"Edit feature": "Unchanged words", "Value": edit_summary["unchanged_words"]},
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with st.expander("Advanced metric settings (research or pilot use)", expanded=False):
+        research_mode = st.toggle(
+            "Research mode",
+            value=True,
+            help="Stores research fields and marks advanced neural metrics as pending.",
+            key=f"research_mode_{selected_assignment_id}_{task_type}",
+        )
+        run_advanced_now = st.toggle(
+            "Run advanced metrics now",
+            value=False,
+            help=(
+                "Leave this off during live classes. BERTScore and COMET can be "
+                "calculated later in batch."
+            ),
+            key=f"advanced_now_{selected_assignment_id}_{task_type}",
+        )
+        use_semantic_cosine = st.checkbox(
+            "Use semantic cosine similarity",
+            value=False,
+            help="Semantic cosine may be slower the first time the model loads.",
+            key=f"semantic_cosine_{selected_assignment_id}_{task_type}",
+        )
+        use_bert = st.checkbox(
+            "Calculate BERTScore",
+            value=False,
+            key=f"bert_{selected_assignment_id}_{task_type}",
+        )
+        bert_language = st.selectbox(
+            "BERTScore language",
+            ["en", "ar", "fr", "de", "es", "zh", "ja", "ko", "tr", "ru"],
+            index=0,
+            key=f"bert_language_{selected_assignment_id}_{task_type}",
+        )
+
+    reference_metrics = compare_postedit_and_reference(
+        post_edited_text=student_answer,
+        reference_translation=reference_translation,
+        use_semantic_cosine=use_semantic_cosine,
+        use_bert=False,
+        bert_language=bert_language,
+    )
+
+    if is_translation(task_type):
+        mt_pe_metrics = {
+            "mt_pe_cosine_similarity": None,
+            "mt_pe_cosine_method": "not_applicable_translation_task",
+            "mt_pe_edit_distance_ratio": None,
+            "mt_pe_length_ratio": None,
+            "mt_pe_bleu": None,
+            "mt_pe_chrf": None,
+            "mt_pe_ter": None,
+            "mt_pe_bertscore_f1": None,
+        }
+        if reference_translation:
+            st.markdown("### Translation vs Reference Translation")
+            st.dataframe(
+                metrics_to_dataframe(reference_metrics),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.warning(
+                "No reference translation was provided, so automatic quality metrics are limited."
+            )
+    else:
+        mt_pe_metrics = compare_mt_and_postedit(
+            raw_mt=raw_mt,
+            post_edited_text=student_answer,
+            use_semantic_cosine=use_semantic_cosine,
+            use_bert=False,
+            bert_language=bert_language,
+        )
+        st.markdown("### Raw MT vs Post-Edited Text")
+        st.dataframe(
+            metrics_to_dataframe(mt_pe_metrics),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            "MT–PE metrics indicate editing overlap and effort; they are not final quality scores."
+        )
+
+        if reference_translation:
+            st.markdown("### Post-Edited Text vs Reference Translation")
+            st.dataframe(
+                metrics_to_dataframe(reference_metrics),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.warning(
+                "No reference translation was provided, so reference-based quality metrics are limited."
+            )
+
+    button_label = f"Submit {task_type_label(task_type)} Task"
+    if st.button(button_label, type="primary", key=f"submit_{selected_assignment_id}_{task_type}"):
+        if not student_id.strip():
+            st.error("Please enter your student ID.")
+            return
+
+        if not student_answer.strip():
+            st.error(f"Please enter your {student_output_label(task_type).lower()} before submitting.")
+            return
+
+        with st.spinner("Calculating final metrics and saving submission..."):
+            if not is_translation(task_type):
+                mt_pe_metrics = compare_mt_and_postedit(
+                    raw_mt=raw_mt,
+                    post_edited_text=student_answer,
+                    use_semantic_cosine=use_semantic_cosine,
+                    use_bert=use_bert,
+                    bert_language=bert_language,
+                )
+
+            reference_metrics = compare_postedit_and_reference(
+                post_edited_text=student_answer,
+                reference_translation=reference_translation,
+                use_semantic_cosine=use_semantic_cosine,
+                use_bert=use_bert,
+                bert_language=bert_language,
+            )
+
+            output_word_count = word_count(student_answer)
+            quality_warnings = build_quality_warnings(
+                mt_pe_metrics,
+                reference_metrics,
+                output_word_count,
+                task_type=task_type,
+            )
+
+            research_results = compare_postedit_with_raw_mt(
+                raw_mt=raw_mt,
+                post_edited_text=student_answer,
+                human_translation=student_answer if is_translation(task_type) else None,
+                reference_text=reference_translation,
+                source_text=source_text,
+                teacher_score=None,
+                teacher_feedback="",
+                use_bert=run_advanced_now and use_bert,
+                bert_language=bert_language,
+                comet_scorer=None,
+            )
+
+            if is_translation(task_type):
+                make_translation_metrics_task_appropriate(
+                    research_results,
+                    has_reference=bool(reference_translation),
+                )
+
+            submission = {
+                "assignment_id": selected_assignment.get("assignment_id"),
+                "assignment_title": selected_assignment.get("title"),
+                "task_type": normalize_task_type(task_type),
+                "student_id": student_id.strip(),
+                "student_name": student_name.strip(),
+                "source_text": source_text,
+                # The MT may remain stored for teacher/research comparison, but it is hidden
+                # from students in Translation mode.
+                "machine_translation": raw_mt,
+                "reference_translation": reference_translation,
+                # Keep this legacy column as the canonical final student output so that
+                # the existing annotation, AI, and analytics pages remain compatible.
+                "post_edited_text": student_answer.strip(),
+                "inserted_words": edit_summary["inserted_words"],
+                "deleted_words": edit_summary["deleted_words"],
+                "replaced_segments": edit_summary["replaced_segments"],
+                "unchanged_words": edit_summary["unchanged_words"],
+                "source_word_count": word_count(source_text),
+                "mt_word_count": word_count(raw_mt) if not is_translation(task_type) else None,
+                "pe_word_count": output_word_count,
+                "quality_warnings": quality_warnings,
+                "teacher_score": None,
+                "teacher_feedback": "",
+            }
+
+            submission.update(mt_pe_metrics)
+            submission.update(reference_metrics)
+            submission.update(
+                build_research_metrics_payload(
+                    research_results,
+                    research_mode=research_mode,
+                )
+            )
+
+            save_submission(submission)
+
+        st.success(f"Your {task_type_label(task_type).lower()} submission has been saved.")
+
+        st.subheader("Automatic Assessment Indicators")
+        if reference_translation:
+            st.dataframe(
+                metrics_to_dataframe(reference_metrics),
+                use_container_width=True,
+                hide_index=True,
+            )
+        st.write(f"**Automatic warnings:** {quality_warnings}")
+        st.warning(
+            "Automatic metrics are indicators only. The teacher makes the final assessment."
+        )
+
+
+# ============================================================
+# Teacher submissions dashboard
+# ============================================================
+
+def teacher_submissions_page():
+    st.title("Teacher Submissions Dashboard")
+
+    if not teacher_login("teacher_submissions"):
+        st.info("Enter the teacher password to view submissions.")
+        return
+
+    submissions = load_submissions()
+
+    if submissions.empty:
+        st.info("No student submissions yet.")
+        return
+
+    assignments = load_assignments()
+
+    assignment_titles = sorted(
+        submissions["assignment_title"].dropna().astype(str).unique().tolist()
+    )
+
+    selected_assignment_title = st.selectbox(
+        "Choose assignment",
+        assignment_titles,
+    )
+
+    filtered = submissions[
+        submissions["assignment_title"].astype(str) == selected_assignment_title
+    ].copy()
+
+    if "task_type" not in filtered.columns:
+        filtered["task_type"] = POST_EDITING
+    filtered["task_type"] = filtered["task_type"].apply(normalize_task_type)
+
+    task_filter = st.selectbox(
+        "Filter by task type",
+        ["All task types", "Translation", "Post-editing"],
+    )
+    if task_filter != "All task types":
+        wanted = TRANSLATION if task_filter == "Translation" else POST_EDITING
+        filtered = filtered[filtered["task_type"] == wanted]
+
+    if filtered.empty:
+        st.info("No submissions match this assignment and task-type filter.")
+        return
+
+    st.subheader(f"Submissions for: {selected_assignment_title}")
+
+    display_columns = [
+        "submitted_at",
+        "student_id",
+        "student_name",
+        "task_type",
+        "pe_word_count",
+        "inserted_words",
+        "deleted_words",
+        "replaced_segments",
+        "mt_pe_cosine_similarity",
+        "mt_pe_edit_distance_ratio",
+        "mt_pe_chrf",
+        "mt_pe_ter",
+        "pe_reference_cosine_similarity",
+        "pe_reference_chrf",
+        "pe_reference_ter",
+        "research_mode",
+        "advanced_metrics_status",
+        "pe_quality_chrf",
+        "pe_quality_ter",
+        "quality_warnings",
+        "teacher_score",
+    ]
+
+    available_columns = [
+        column for column in display_columns if column in filtered.columns
+    ]
+
+    st.dataframe(
+        filtered[available_columns],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+
+    st.subheader("Research Export")
+
+    research_columns = [
+        "submitted_at",
+        "assignment_id",
+        "assignment_title",
+        "task_type",
+        "student_id",
+        "student_name",
+        "source_text",
+        "machine_translation",
+        "reference_translation",
+        "post_edited_text",
+        "inserted_words",
+        "deleted_words",
+        "replaced_segments",
+        "unchanged_words",
+        "source_word_count",
+        "mt_word_count",
+        "pe_word_count",
+        "mt_pe_cosine_similarity",
+        "mt_pe_cosine_method",
+        "mt_pe_edit_distance_ratio",
+        "mt_pe_length_ratio",
+        "mt_pe_bleu",
+        "mt_pe_chrf",
+        "mt_pe_ter",
+        "mt_pe_bertscore_f1",
+        "pe_reference_cosine_similarity",
+        "pe_reference_cosine_method",
+        "pe_reference_length_ratio",
+        "pe_reference_bleu",
+        "pe_reference_chrf",
+        "pe_reference_ter",
+        "pe_reference_bertscore_f1",
+        "research_mode",
+        "advanced_metrics_status",
+        "raw_mt_word_count",
+        "reference_word_count",
+        "mt_pe_word_count_difference",
+        "mt_pe_lexical_similarity",
+        "mt_pe_change_ratio",
+        "mt_pe_replacement_output_words",
+        "mt_pe_changed_original_words",
+        "mt_pe_unchanged_ratio",
+        "mt_pe_changed_ratio_original",
+        "mt_pe_overlap_bleu",
+        "mt_pe_overlap_chrf",
+        "mt_pe_overlap_ter",
+        "raw_mt_quality_bleu",
+        "raw_mt_quality_chrf",
+        "raw_mt_quality_ter",
+        "pe_quality_bleu",
+        "pe_quality_chrf",
+        "pe_quality_ter",
+        "ht_quality_bleu",
+        "ht_quality_chrf",
+        "ht_quality_ter",
+        "raw_mt_quality_bertscore_f1",
+        "pe_quality_bertscore_f1",
+        "ht_quality_bertscore_f1",
+        "raw_mt_quality_comet",
+        "pe_quality_comet",
+        "ht_quality_comet",
+        "mt_pe_interpretation",
+        "quality_warnings",
+        "teacher_score",
+        "teacher_feedback",
+    ]
+
+    available_research_columns = [
+        column for column in research_columns if column in filtered.columns
+    ]
+
+    research_df = filtered[available_research_columns]
+
+    csv_data = research_df.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        "Download research dataset as CSV",
+        data=csv_data,
+        file_name="translation_postediting_research_dataset.csv",
+        mime="text/csv",
+    )
+
+    excel_buffer = io.BytesIO()
+
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        research_df.to_excel(writer, index=False, sheet_name="Research Data")
+
+    excel_buffer.seek(0)
+
+    st.download_button(
+        "Download research dataset as Excel",
+        data=excel_buffer,
+        file_name="translation_postediting_research_dataset.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    zip_buffer = create_zip_of_word_docs(filtered)
+
+    st.download_button(
+        "Download all submissions as Word documents",
+        data=zip_buffer,
+        file_name="translation_postediting_submissions.zip",
+        mime="application/zip",
+    )
+
+    st.divider()
+
+    st.subheader("Review Individual Submission")
+
+    submission_labels = []
+
+    for _, row in filtered.iterrows():
+        label = (
+            f"{row.get('student_id', '')} — {row.get('student_name', '')} — "
+            f"{task_type_label(row.get('task_type'))} — "
+            f"{row.get('submitted_at', '')} — ID {row.get('submission_id', '')}"
+        )
+        submission_labels.append(label)
+
+    selected_submission_label = st.selectbox(
+        "Choose submission",
+        submission_labels,
+    )
+
+    selected_submission_id = selected_submission_label.split("ID ")[-1]
+
+    selected_submission = filtered[
+        filtered["submission_id"].astype(str) == selected_submission_id
+    ].iloc[0]
+
+    selected_task_type = normalize_task_type(selected_submission.get("task_type"))
+    st.write(f"**Task type:** {task_type_label(selected_task_type)}")
+
+    st.markdown("### Source Text")
+    st.text_area(
+        "Selected source text",
+        selected_submission.get("source_text", ""),
+        height=180,
+        disabled=True,
+        label_visibility="collapsed",
+    )
+
+    if not is_translation(selected_task_type):
+        st.markdown("### Raw Machine Translation")
+        st.text_area(
+            "Selected raw MT",
+            selected_submission.get("machine_translation", ""),
+            height=180,
+            disabled=True,
+            label_visibility="collapsed",
+        )
+
+    output_label = student_output_label(selected_task_type)
+    st.markdown(f"### {output_label}")
+    st.text_area(
+        output_label,
+        selected_submission.get("post_edited_text", ""),
+        height=250,
+        disabled=True,
+        label_visibility="collapsed",
+    )
+
+    if not is_translation(selected_task_type):
+        st.markdown("### Track Changes Preview")
+        st.markdown(
+            f"""
+            <div class="track-box">
+            {make_track_changes_html(
+                selected_submission.get("machine_translation", ""),
+                selected_submission.get("post_edited_text", ""),
+            )}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    metric_columns = [
+        "inserted_words",
+        "deleted_words",
+        "replaced_segments",
+        "unchanged_words",
+        "source_word_count",
+        "mt_word_count",
+        "pe_word_count",
+        "mt_pe_cosine_similarity",
+        "mt_pe_cosine_method",
+        "mt_pe_edit_distance_ratio",
+        "mt_pe_length_ratio",
+        "mt_pe_bleu",
+        "mt_pe_chrf",
+        "mt_pe_ter",
+        "mt_pe_bertscore_f1",
+        "pe_reference_cosine_similarity",
+        "pe_reference_cosine_method",
+        "pe_reference_length_ratio",
+        "pe_reference_bleu",
+        "pe_reference_chrf",
+        "pe_reference_ter",
+        "pe_reference_bertscore_f1",
+        "research_mode",
+        "advanced_metrics_status",
+        "raw_mt_quality_bleu",
+        "raw_mt_quality_chrf",
+        "raw_mt_quality_ter",
+        "pe_quality_bleu",
+        "pe_quality_chrf",
+        "pe_quality_ter",
+        "ht_quality_bleu",
+        "ht_quality_chrf",
+        "ht_quality_ter",
+        "raw_mt_quality_bertscore_f1",
+        "pe_quality_bertscore_f1",
+        "ht_quality_bertscore_f1",
+        "raw_mt_quality_comet",
+        "pe_quality_comet",
+        "ht_quality_comet",
+        "mt_pe_interpretation",
+        "quality_warnings",
+    ]
+
+    if is_translation(selected_task_type):
+        post_editing_only = set(POST_EDITING_ONLY_METRIC_FIELDS) | {
+            "inserted_words",
+            "deleted_words",
+            "replaced_segments",
+            "unchanged_words",
+            "mt_word_count",
+        }
+        metric_columns = [
+            column for column in metric_columns if column not in post_editing_only
+        ]
+
+    metric_rows = []
+
+    for column in metric_columns:
+        metric_rows.append(
+            {
+                "Metric": column,
+                "Value": selected_submission.get(column, ""),
+            }
+        )
+
+    st.markdown("### Automatic Metrics")
+
+    st.dataframe(
+        pd.DataFrame(metric_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("### Teacher Review")
+
+    max_score = 100.0
+
+    if not assignments.empty and "title" in assignments.columns:
+        matching_assignment = assignments[
+            assignments["title"].astype(str) == str(selected_assignment_title)
+        ]
+
+        if not matching_assignment.empty:
+            try:
+                max_score = float(matching_assignment.iloc[0]["max_score"])
+            except Exception:
+                max_score = 100.0
+
+    current_score = selected_submission.get("teacher_score", 0)
+
+    try:
+        current_score = float(current_score)
+    except Exception:
+        current_score = 0.0
+
+    teacher_score = st.number_input(
+        "Teacher score",
+        min_value=0.0,
+        max_value=max_score,
+        value=current_score,
+        step=0.5,
+    )
+
+    teacher_feedback = st.text_area(
+        "Teacher feedback",
+        value=safe_text(selected_submission.get("teacher_feedback")),
+        height=120,
+    )
+
+    if st.button("Save Teacher Review"):
+        update_submission_review(
+            selected_submission_id,
+            teacher_score,
+            teacher_feedback,
+        )
+
+        st.success("Teacher review saved.")
+        st.rerun()
+
+    single_docx = create_submission_docx(selected_submission.to_dict())
+
+    single_filename = (
+        clean_filename(selected_assignment_title)
+        + "_"
+        + clean_filename(selected_submission.get("student_id"))
+        + ".docx"
+    )
+
+    st.download_button(
+        "Download this submission as Word document",
+        data=single_docx,
+        file_name=single_filename,
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )

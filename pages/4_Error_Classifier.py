@@ -2,6 +2,9 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
+from modules.auth import require_teacher_access
+from modules.task_mode import POST_EDITING, is_translation, normalize_task_type, student_output_label, task_type_label
+
 from modules.error_classifier import (
     load_model,
     predict_error_category,
@@ -10,20 +13,14 @@ from modules.error_classifier import (
 )
 
 
-# ============================================================
-# Page configuration
-# ============================================================
-
-st.set_page_config(
-    page_title="Error Classifier",
-    page_icon="🤖",
-    layout="wide",
-)
-
 st.title("Translation Error Classification Model")
 st.write(
     "Train a baseline machine-learning model using teacher-labelled error categories."
 )
+
+
+if not require_teacher_access("error_classifier"):
+    st.stop()
 
 
 # ============================================================
@@ -148,6 +145,11 @@ def load_training_data():
         pd.Series([""] * len(merged)),
     )
 
+    training_df["task_type"] = merged.get(
+        "task_type",
+        pd.Series([POST_EDITING] * len(merged)),
+    ).apply(normalize_task_type)
+
     training_df["category"] = merged.get(
         "category",
         pd.Series([None] * len(merged)),
@@ -217,6 +219,7 @@ st.metric("Labelled Examples", len(labelled_df))
 if len(labelled_df) > 0:
     display_columns = [
         "segment_id",
+        "task_type",
         "source_text",
         "mt_output",
         "post_edited_text",
@@ -315,12 +318,18 @@ else:
         st.warning("No student submissions available.")
 
     else:
+        submissions = submissions.copy()
+        if "task_type" not in submissions.columns:
+            submissions["task_type"] = POST_EDITING
+        submissions["task_type"] = submissions["task_type"].apply(normalize_task_type)
+
         submission_labels = []
 
         for _, row in submissions.iterrows():
             label = (
                 f"{safe_text(row.get('student_id'))} — "
                 f"{safe_text(row.get('student_name'))} — "
+                f"{task_type_label(row.get('task_type'))} — "
                 f"{safe_text(row.get('assignment_title'))} — "
                 f"ID {safe_text(row.get('submission_id'))}"
             )
@@ -343,19 +352,28 @@ else:
 
         submission = selected_df.iloc[0].to_dict()
 
-        col1, col2, col3 = st.columns(3)
+        selected_task_type = normalize_task_type(submission.get("task_type"))
+        st.write(f"**Task type:** {task_type_label(selected_task_type)}")
 
-        with col1:
-            st.markdown("**Source Text**")
-            st.write(safe_text(submission.get("source_text")))
-
-        with col2:
-            st.markdown("**Machine Translation**")
-            st.write(safe_text(submission.get("machine_translation")))
-
-        with col3:
-            st.markdown("**Post-Edited Text**")
-            st.write(safe_text(submission.get("post_edited_text")))
+        if is_translation(selected_task_type):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Source Text**")
+                st.write(safe_text(submission.get("source_text")))
+            with col2:
+                st.markdown(f"**{student_output_label(selected_task_type)}**")
+                st.write(safe_text(submission.get("post_edited_text")))
+        else:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown("**Source Text**")
+                st.write(safe_text(submission.get("source_text")))
+            with col2:
+                st.markdown("**Machine Translation**")
+                st.write(safe_text(submission.get("machine_translation")))
+            with col3:
+                st.markdown(f"**{student_output_label(selected_task_type)}**")
+                st.write(safe_text(submission.get("post_edited_text")))
 
         if st.button("Predict Error Category"):
             prediction = predict_error_category(

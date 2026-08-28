@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from modules.taxonomy import ERROR_TAXONOMY, RUBRIC
+from modules.task_mode import is_translation, normalize_task_type, task_type_label
 
 load_dotenv()
 
@@ -35,15 +36,34 @@ def build_feedback_prompt(
     change_ratio=None,
     mt_pe_semantic_similarity=None,
     source_pe_semantic_similarity=None,
+    task_type="post_editing",
 ):
-    return f"""
-You are assisting a translation teacher.
+    task_type = normalize_task_type(task_type)
+    task_name = task_type_label(task_type)
 
-Your task is to analyse a student's post-edited translation.
-Use the taxonomy and rubric provided below.
+    if is_translation(task_type):
+        task_context = f"""
+TASK TYPE: TRANSLATION
+The student translated independently from the source text. Do not describe the
+student's work as post-editing. A machine translation may be included below only
+as a teacher/research benchmark; it was not the student's starting text. Do not
+infer editing effort or praise/criticise how much the student changed that MT.
 
-SOURCE TEXT:
-{source_text}
+OPTIONAL MACHINE-TRANSLATION BENCHMARK:
+{mt_output or '[not provided]'}
+
+STUDENT TRANSLATION:
+{post_edited_text}
+
+TASK METRICS:
+- Task time in seconds: {editing_time_seconds}
+- Source vs student-output semantic similarity: {source_pe_semantic_similarity}
+- MT-vs-output effort metrics: not applicable
+"""
+    else:
+        task_context = f"""
+TASK TYPE: POST-EDITING
+The student revised the machine translation shown below.
 
 MACHINE TRANSLATION:
 {mt_output}
@@ -51,12 +71,23 @@ MACHINE TRANSLATION:
 STUDENT POST-EDITED VERSION:
 {post_edited_text}
 
-METRICS:
+TASK METRICS:
 - Editing time in seconds: {editing_time_seconds}
 - MT vs PE lexical similarity: {lexical_similarity}
 - Change ratio: {change_ratio}
 - MT vs PE semantic similarity: {mt_pe_semantic_similarity}
 - Source vs PE semantic similarity: {source_pe_semantic_similarity}
+"""
+
+    return f"""
+You are assisting a translation teacher.
+
+Analyse a student's {task_name.lower()} output. Use the taxonomy and rubric below.
+
+SOURCE TEXT:
+{source_text}
+
+{task_context}
 
 ERROR TAXONOMY:
 {json.dumps(ERROR_TAXONOMY, ensure_ascii=False, indent=2)}
@@ -65,14 +96,14 @@ RUBRIC:
 {json.dumps(RUBRIC, ensure_ascii=False, indent=2)}
 
 INSTRUCTIONS:
-1. Identify possible translation or post-editing issues.
+1. Identify only issues supported by the source and student output.
 2. Classify each issue using the taxonomy.
 3. Use only these main categories: accuracy, terminology, fluency, style_register, locale_cultural, formatting.
 4. Assign severity: minor, major, or critical.
-5. Provide evidence from the text.
-6. Give student-friendly pedagogical feedback.
-7. If uncertain, say teacher review is needed.
-8. Do not invent problems that are not supported by the texts.
+5. Quote concise evidence from the supplied text.
+6. Give student-friendly pedagogical feedback appropriate to a {task_name.lower()} task.
+7. If uncertain, explicitly say that teacher review is needed.
+8. Do not invent problems or assume that surface difference alone is an error.
 9. Return only valid JSON.
 
 REQUIRED JSON FORMAT:
@@ -110,6 +141,7 @@ def generate_ai_feedback(
     change_ratio=None,
     mt_pe_semantic_similarity=None,
     source_pe_semantic_similarity=None,
+    task_type="post_editing",
     model_name="gpt-4.1-mini",
 ):
     prompt = build_feedback_prompt(
@@ -121,6 +153,7 @@ def generate_ai_feedback(
         change_ratio=change_ratio,
         mt_pe_semantic_similarity=mt_pe_semantic_similarity,
         source_pe_semantic_similarity=source_pe_semantic_similarity,
+        task_type=task_type,
     )
 
     client = get_client()
