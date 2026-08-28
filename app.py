@@ -40,6 +40,30 @@ st.markdown(
     .same-word {
         padding: 2px 1px;
     }
+
+    /* Keep interface text crisp instead of Streamlit's muted/faded treatment. */
+    [data-testid="stSidebarNav"] *,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] small,
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stCaptionContainer"] {
+        opacity: 1 !important;
+        color: var(--text-color) !important;
+    }
+
+    [data-testid="stSidebarNav"] span,
+    [data-testid="stSidebarNav"] p,
+    [data-testid="stSidebarNav"] a {
+        font-weight: 600 !important;
+    }
+
+    /* Make secondary/help text readable while still adapting to light/dark themes. */
+    [data-testid="stCaptionContainer"] p,
+    [data-testid="InputInstructions"] {
+        opacity: 1 !important;
+        color: var(--text-color) !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
