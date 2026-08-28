@@ -64,6 +64,24 @@ st.markdown(
         opacity: 1 !important;
         color: var(--text-color) !important;
     }
+
+    /* Streamlit/browser styles fade disabled text areas by default.
+       Keep read-only source/MT text fully legible. */
+    textarea:disabled,
+    input:disabled,
+    [data-baseweb="textarea"] textarea:disabled,
+    [data-baseweb="input"] input:disabled {
+        opacity: 1 !important;
+        color: var(--text-color) !important;
+        -webkit-text-fill-color: var(--text-color) !important;
+    }
+
+    [data-baseweb="textarea"] textarea:disabled::placeholder,
+    [data-baseweb="input"] input:disabled::placeholder {
+        opacity: 1 !important;
+        color: var(--text-color) !important;
+        -webkit-text-fill-color: var(--text-color) !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
