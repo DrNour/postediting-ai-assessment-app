@@ -26,6 +26,88 @@ from modules.task_mode import (
 )
 
 
+def install_student_paste_guard():
+    """Block paste and drag/drop into the student translation/post-editing boxes.
+
+    This is a browser-side deterrent for supervised coursework. It does not make
+    external-tool use impossible, because students control their own browsers.
+    """
+    st.info(
+        "Academic integrity mode is active: pasting or dropping text into the "
+        "translation/post-editing box is disabled. Please type your work directly."
+    )
+
+    guard_js = r"""
+    <script>
+    (() => {
+      const protectedLabels = new Set(["Translation box", "Post-editing box"]);
+
+      const isProtected = (el) =>
+        el && el.tagName === "TEXTAREA" && protectedLabels.has(el.getAttribute("aria-label"));
+
+      const showBlockedNotice = (el) => {
+        const oldTitle = el.getAttribute("title") || "";
+        el.setAttribute("title", "Pasting is disabled for this assessed task. Type your work directly.");
+        el.style.outline = "2px solid var(--st-primary-color, #ff4b4b)";
+        window.setTimeout(() => {
+          el.style.outline = "";
+          if (oldTitle) el.setAttribute("title", oldTitle);
+          else el.removeAttribute("title");
+        }, 1400);
+      };
+
+      const block = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+        showBlockedNotice(event.currentTarget);
+        return false;
+      };
+
+      const protect = (el) => {
+        if (!isProtected(el) || el.dataset.eduappPasteGuard === "1") return;
+        el.dataset.eduappPasteGuard = "1";
+        el.setAttribute("autocomplete", "off");
+        el.setAttribute("autocapitalize", "off");
+
+        el.addEventListener("paste", block, true);
+        el.addEventListener("drop", block, true);
+
+        el.addEventListener("beforeinput", (event) => {
+          if (event.inputType === "insertFromPaste" || event.inputType === "insertFromDrop") {
+            block(event);
+          }
+        }, true);
+
+        el.addEventListener("keydown", (event) => {
+          const key = (event.key || "").toLowerCase();
+          const pasteShortcut = (event.ctrlKey || event.metaKey) && key === "v";
+          const shiftInsert = event.shiftKey && event.key === "Insert";
+          if (pasteShortcut || shiftInsert) block(event);
+        }, true);
+      };
+
+      const scan = () => document.querySelectorAll("textarea").forEach(protect);
+      scan();
+
+      if (!window.__eduappPasteGuardObserver) {
+        const observer = new MutationObserver(scan);
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        window.__eduappPasteGuardObserver = observer;
+      }
+    })();
+    </script>
+    """
+
+    if hasattr(st, "html"):
+        st.html(guard_js, unsafe_allow_javascript=True)
+    else:
+        st.warning(
+            "Your Streamlit version is too old for the browser-side paste guard. "
+            "Upgrade Streamlit to a recent version."
+        )
+
+
 # ============================================================
 # Supabase connection
 # ============================================================
@@ -1062,6 +1144,9 @@ def student_assignment_page():
             use_container_width=True,
             hide_index=True,
         )
+
+    # Apply the browser-side integrity guard only to the assessed student response boxes.
+    install_student_paste_guard()
 
     with st.expander("Advanced metric settings (research or pilot use)", expanded=False):
         research_mode = st.toggle(
