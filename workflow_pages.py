@@ -1180,15 +1180,6 @@ def student_assignment_page():
     raw_mt = safe_text(selected_assignment.get("machine_translation"))
     reference_translation = safe_text(selected_assignment.get("reference_translation"))
 
-    st.markdown("### Source Text")
-    st.text_area(
-        "Source text",
-        source_text,
-        height=180,
-        disabled=True,
-        label_visibility="collapsed",
-    )
-
     st.markdown("### Student Information")
     student_col1, student_col2 = st.columns(2)
     with student_col1:
@@ -1256,16 +1247,29 @@ def student_assignment_page():
     ):
         st.success("Saved draft loaded. You can continue from where you stopped.")
 
-    if is_translation(task_type):
-
-        st.markdown("### Your Translation")
-        student_answer = st.text_area(
-            "Translation box",
-            key=answer_key,
-            height=300,
-            placeholder="Write your translation here.",
+    # Keep the source and the student's working box together so students can compare
+    # them without scrolling up and down.
+    source_col, work_col = st.columns(2, gap="medium")
+    with source_col:
+        st.markdown("### Source Text")
+        st.text_area(
+            "Source text",
+            source_text,
+            height=360,
+            disabled=True,
             label_visibility="collapsed",
         )
+
+    if is_translation(task_type):
+        with work_col:
+            st.markdown("### Your Translation")
+            student_answer = st.text_area(
+                "Translation box",
+                key=answer_key,
+                height=360,
+                placeholder="Write your translation here.",
+                label_visibility="collapsed",
+            )
         edit_summary = {
             "inserted_words": None,
             "deleted_words": None,
@@ -1273,22 +1277,22 @@ def student_assignment_page():
             "unchanged_words": None,
         }
     else:
-        st.markdown("### Raw Machine Translation")
-        st.text_area(
-            "Original raw MT output",
-            raw_mt,
-            height=180,
-            disabled=True,
-            label_visibility="collapsed",
-        )
-
-        st.markdown("### Post-edit the MT Output")
-        student_answer = st.text_area(
-            "Post-editing box",
-            key=answer_key,
-            height=300,
-            label_visibility="collapsed",
-        )
+        with work_col:
+            st.markdown("### Post-edit the MT Output")
+            st.caption("Raw MT is shown below for reference while you post-edit.")
+            st.text_area(
+                "Original raw MT output",
+                raw_mt,
+                height=150,
+                disabled=True,
+                label_visibility="collapsed",
+            )
+            student_answer = st.text_area(
+                "Post-editing box",
+                key=answer_key,
+                height=170,
+                label_visibility="collapsed",
+            )
 
         st.markdown("### Track Changes Preview")
         track_changes_html = make_track_changes_html(raw_mt, student_answer)
