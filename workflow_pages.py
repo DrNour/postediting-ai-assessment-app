@@ -7,6 +7,7 @@ from collections import Counter
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from docx import Document
 from docx.shared import RGBColor
 from supabase import create_client
@@ -27,55 +28,121 @@ from modules.task_mode import (
 
 
 def install_student_paste_guard():
-    """Block paste and drag/drop into the student translation/post-editing boxes.
+    """Apply browser-side integrity controls to assessed response boxes.
 
-    This is a browser-side deterrent for supervised coursework. It does not make
-    external-tool use impossible, because students control their own browsers.
+    The guard blocks paste/drop and common dictation-style insertion events. On
+    phones and tablets the assessed response boxes are made read-only so students
+    must complete the task on a desktop/laptop. This remains a deterrent rather
+    than a mathematically foolproof proctoring mechanism: operating-system tools
+    can sometimes make dictated text look like ordinary keyboard input.
     """
     st.info(
-        "Academic integrity mode is active: pasting or dropping text into the "
-        "translation/post-editing box is disabled. Please type your work directly."
+        "Academic integrity mode is active: paste, drag/drop, and detected voice "
+        "dictation are blocked. Assessed responses must be completed on a "
+        "desktop/laptop and typed directly into the app."
     )
 
     guard_js = r"""
     <script>
     (() => {
+      let rootDoc;
+      let rootWin;
+      try {
+        rootDoc = window.parent.document;
+        rootWin = window.parent;
+      } catch (e) {
+        rootDoc = document;
+        rootWin = window;
+      }
+
       const protectedLabels = new Set(["Translation box", "Post-editing box"]);
+      const mobileRe = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|Tablet/i;
+      const isMobile = mobileRe.test((rootWin.navigator && rootWin.navigator.userAgent) || "");
 
       const isProtected = (el) =>
         el && el.tagName === "TEXTAREA" && protectedLabels.has(el.getAttribute("aria-label"));
 
-      const showBlockedNotice = (el) => {
+      const addMessage = (el, text, kind) => {
+        const host = el.closest('[data-testid="stTextArea"]') || el.parentElement;
+        if (!host) return;
+        const cls = "eduapp-integrity-" + kind;
+        if (host.querySelector("." + cls)) return;
+        const msg = rootDoc.createElement("div");
+        msg.className = cls;
+        msg.textContent = text;
+        msg.style.fontSize = "0.9rem";
+        msg.style.fontWeight = "600";
+        msg.style.marginTop = "0.35rem";
+        msg.style.padding = "0.45rem 0.6rem";
+        msg.style.borderRadius = "0.35rem";
+        msg.style.background = "rgba(255, 193, 7, 0.14)";
+        msg.style.border = "1px solid rgba(255, 193, 7, 0.45)";
+        host.appendChild(msg);
+      };
+
+      const flashBlocked = (el, reason) => {
         const oldTitle = el.getAttribute("title") || "";
-        el.setAttribute("title", "Pasting is disabled for this assessed task. Type your work directly.");
+        el.setAttribute("title", reason);
         el.style.outline = "2px solid var(--st-primary-color, #ff4b4b)";
-        window.setTimeout(() => {
+        addMessage(el, reason, "blocked");
+        rootWin.setTimeout(() => {
           el.style.outline = "";
           if (oldTitle) el.setAttribute("title", oldTitle);
           else el.removeAttribute("title");
-        }, 1400);
+        }, 1600);
       };
 
-      const block = (event) => {
+      const block = (event, reason) => {
         event.preventDefault();
         event.stopPropagation();
         if (event.stopImmediatePropagation) event.stopImmediatePropagation();
-        showBlockedNotice(event.currentTarget);
+        flashBlocked(event.currentTarget || event.target, reason);
         return false;
       };
 
       const protect = (el) => {
-        if (!isProtected(el) || el.dataset.eduappPasteGuard === "1") return;
-        el.dataset.eduappPasteGuard = "1";
+        if (!isProtected(el) || el.dataset.eduappIntegrityGuard === "1") return;
+        el.dataset.eduappIntegrityGuard = "1";
         el.setAttribute("autocomplete", "off");
         el.setAttribute("autocapitalize", "off");
+        el.setAttribute("spellcheck", "false");
 
-        el.addEventListener("paste", block, true);
-        el.addEventListener("drop", block, true);
+        // Strongest practical protection against phone-keyboard dictation:
+        // assessed response entry is disabled on phones/tablets.
+        if (isMobile) {
+          el.readOnly = true;
+          el.setAttribute("inputmode", "none");
+          el.setAttribute("placeholder", "Use a desktop or laptop for this assessed task.");
+          addMessage(
+            el,
+            "Phone/tablet input is disabled for this assessed task. Please use a desktop or laptop.",
+            "mobile"
+          );
+        }
+
+        el.addEventListener("paste", (event) =>
+          block(event, "Pasting is disabled. Type the response directly."), true);
+        el.addEventListener("drop", (event) =>
+          block(event, "Dropping external text is disabled."), true);
 
         el.addEventListener("beforeinput", (event) => {
-          if (event.inputType === "insertFromPaste" || event.inputType === "insertFromDrop") {
-            block(event);
+          const t = event.inputType || "";
+          if (t === "insertFromPaste" || t === "insertFromDrop") {
+            block(event, "Pasting or dropping external text is disabled.");
+            return;
+          }
+          if (t === "insertFromDictation") {
+            block(event, "Voice dictation is disabled for this assessed task.");
+            return;
+          }
+
+          // Many mobile/OS dictation systems expose a whole phrase as one trusted
+          // insertText/replacement event. Block unusually large single-event inserts
+          // while leaving normal typing and IME composition alone.
+          const data = typeof event.data === "string" ? event.data : "";
+          const largeChunk = !event.isComposing && data.length >= 8;
+          if ((t === "insertText" || t === "insertReplacementText") && largeChunk) {
+            block(event, "Large one-step text insertion/voice dictation is disabled. Type normally.");
           }
         }, true);
 
@@ -83,29 +150,27 @@ def install_student_paste_guard():
           const key = (event.key || "").toLowerCase();
           const pasteShortcut = (event.ctrlKey || event.metaKey) && key === "v";
           const shiftInsert = event.shiftKey && event.key === "Insert";
-          if (pasteShortcut || shiftInsert) block(event);
+          if (pasteShortcut || shiftInsert) {
+            block(event, "Pasting is disabled. Type the response directly.");
+          }
         }, true);
       };
 
-      const scan = () => document.querySelectorAll("textarea").forEach(protect);
+      const scan = () => rootDoc.querySelectorAll("textarea").forEach(protect);
       scan();
 
-      if (!window.__eduappPasteGuardObserver) {
-        const observer = new MutationObserver(scan);
-        observer.observe(document.documentElement, { childList: true, subtree: true });
-        window.__eduappPasteGuardObserver = observer;
+      if (!rootWin.__eduappIntegrityGuardObserver) {
+        const observer = new rootWin.MutationObserver(scan);
+        observer.observe(rootDoc.documentElement, { childList: true, subtree: true });
+        rootWin.__eduappIntegrityGuardObserver = observer;
       }
     })();
     </script>
     """
 
-    if hasattr(st, "html"):
-        st.html(guard_js, unsafe_allow_javascript=True)
-    else:
-        st.warning(
-            "Your Streamlit version is too old for the browser-side paste guard. "
-            "Upgrade Streamlit to a recent version."
-        )
+    # components.html executes JavaScript in a small iframe; the script then
+    # targets the parent Streamlit document. Height zero keeps it invisible.
+    components.html(guard_js, height=0, width=0)
 
 
 # ============================================================
@@ -239,6 +304,81 @@ def save_submission(submission):
 
         st.stop()
 
+
+
+def load_student_draft(assignment_id, task_type, student_id):
+    """Return the most recent saved draft for one student/task, if present."""
+    sid = safe_text(student_id)
+    if not sid:
+        return None
+    try:
+        response = (
+            get_supabase_client().table("student_drafts")
+            .select("*")
+            .eq("assignment_id", safe_text(assignment_id))
+            .eq("task_type", normalize_task_type(task_type))
+            .eq("student_id", sid)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return rows[0] if rows else None
+    except Exception as error:
+        st.error("Could not load the saved draft from Supabase.")
+        if "student_drafts" in str(error).lower():
+            st.warning(
+                "Run the student_drafts migration in the Supabase SQL Editor once, then try again."
+            )
+        st.code(str(error))
+        return None
+
+
+def save_student_draft(draft):
+    """Save or replace one student's draft without creating a final submission."""
+    clean_draft = {
+        key: clean_value_for_supabase(value)
+        for key, value in draft.items()
+    }
+    client = get_supabase_client()
+    try:
+        # Delete+insert avoids depending on a particular supabase-py upsert signature.
+        (
+            client.table("student_drafts")
+            .delete()
+            .eq("assignment_id", clean_draft["assignment_id"])
+            .eq("task_type", clean_draft["task_type"])
+            .eq("student_id", clean_draft["student_id"])
+            .execute()
+        )
+        return client.table("student_drafts").insert(clean_draft).execute()
+    except Exception as error:
+        st.error("Could not save the draft to Supabase.")
+        if "student_drafts" in str(error).lower():
+            st.warning(
+                "Run the student_drafts migration in the Supabase SQL Editor once, then try again."
+            )
+        st.code(str(error))
+        return None
+
+
+def delete_student_draft(assignment_id, task_type, student_id):
+    """Remove a draft after the final submission has been stored successfully."""
+    sid = safe_text(student_id)
+    if not sid:
+        return
+    try:
+        (
+            get_supabase_client().table("student_drafts")
+            .delete()
+            .eq("assignment_id", safe_text(assignment_id))
+            .eq("task_type", normalize_task_type(task_type))
+            .eq("student_id", sid)
+            .execute()
+        )
+    except Exception:
+        # A stale draft is not serious enough to invalidate a successful submission.
+        pass
 
 def update_submission_review(submission_id, teacher_score, teacher_feedback):
     return (
@@ -1082,10 +1222,41 @@ def student_assignment_page():
     task_type = TASK_OPTIONS[selected_task_label]
     st.info(task_instruction(task_type))
 
+    answer_key = (
+        f"student_translation_{selected_assignment_id}"
+        if is_translation(task_type)
+        else f"student_post_edit_{selected_assignment_id}"
+    )
+    default_answer = "" if is_translation(task_type) else raw_mt
+    if answer_key not in st.session_state:
+        st.session_state[answer_key] = default_answer
+
+    st.markdown("### Continue a Saved Draft")
+    st.caption(
+        "Drafts are stored in Supabase and are separate for Translation and Post-editing. "
+        "Enter the same Student ID when you return."
+    )
+    if st.button(
+        "Load / resume saved draft",
+        key=f"load_draft_{selected_assignment_id}_{task_type}",
+    ):
+        if not student_id.strip():
+            st.error("Enter your Student ID first so the app can find your draft.")
+        else:
+            draft = load_student_draft(selected_assignment_id, task_type, student_id)
+            if draft:
+                st.session_state[answer_key] = safe_text(draft.get("draft_text"))
+                st.session_state[f"draft_loaded_notice_{selected_assignment_id}_{task_type}"] = True
+                st.rerun()
+            else:
+                st.info("No saved draft was found for this Student ID and task type.")
+
+    if st.session_state.pop(
+        f"draft_loaded_notice_{selected_assignment_id}_{task_type}", False
+    ):
+        st.success("Saved draft loaded. You can continue from where you stopped.")
+
     if is_translation(task_type):
-        answer_key = f"student_translation_{selected_assignment_id}"
-        if answer_key not in st.session_state:
-            st.session_state[answer_key] = ""
 
         st.markdown("### Your Translation")
         student_answer = st.text_area(
@@ -1110,10 +1281,6 @@ def student_assignment_page():
             disabled=True,
             label_visibility="collapsed",
         )
-
-        answer_key = f"student_post_edit_{selected_assignment_id}"
-        if answer_key not in st.session_state:
-            st.session_state[answer_key] = raw_mt
 
         st.markdown("### Post-edit the MT Output")
         student_answer = st.text_area(
@@ -1144,6 +1311,37 @@ def student_assignment_page():
             use_container_width=True,
             hide_index=True,
         )
+
+    save_col, note_col = st.columns([1, 2])
+    with save_col:
+        save_draft_clicked = st.button(
+            "Save draft for later",
+            key=f"save_draft_{selected_assignment_id}_{task_type}",
+            use_container_width=True,
+        )
+    with note_col:
+        st.caption(
+            "Saving a draft does not submit the assignment. You may close the app and return later."
+        )
+
+    if save_draft_clicked:
+        if not student_id.strip():
+            st.error("Enter your Student ID before saving a draft.")
+        else:
+            result = save_student_draft(
+                {
+                    "assignment_id": safe_text(selected_assignment_id),
+                    "task_type": normalize_task_type(task_type),
+                    "student_id": student_id.strip(),
+                    "student_name": student_name.strip(),
+                    "draft_text": student_answer,
+                }
+            )
+            if result is not None:
+                st.success(
+                    "Draft saved. Return to this assignment later, enter the same Student ID, "
+                    "choose the same task type, and click 'Load / resume saved draft'."
+                )
 
     # Apply the browser-side integrity guard only to the assessed student response boxes.
     install_student_paste_guard()
@@ -1333,6 +1531,7 @@ def student_assignment_page():
             )
 
             save_submission(submission)
+            delete_student_draft(selected_assignment_id, task_type, student_id)
 
         st.success(f"Your {task_type_label(task_type).lower()} submission has been saved.")
 
