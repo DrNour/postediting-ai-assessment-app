@@ -4,6 +4,8 @@ import zipfile
 import difflib
 import html
 import math
+import secrets as pysecrets
+import string
 from collections import Counter
 
 import pandas as pd
@@ -290,6 +292,74 @@ def parse_audience_rules(value):
             rules.append({"group": group, "code": code})
     return rules
 
+
+
+
+def generate_access_code(length=6):
+    """Generate a short classroom access code that avoids ambiguous characters."""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(pysecrets.choice(alphabet) for _ in range(length))
+
+
+def audience_rules_from_editor(editor_value):
+    """Normalize the class/group table into [{group, code}] rules.
+
+    Blank access codes are generated automatically. Completely blank rows are ignored.
+    """
+    if editor_value is None:
+        return [], []
+    try:
+        df = pd.DataFrame(editor_value).copy()
+    except Exception:
+        return [], ["Could not read the class/group table."]
+
+    if df.empty:
+        return [], []
+
+    # Accept both current UI column labels and any older internal names.
+    rename_map = {}
+    for col in df.columns:
+        key = safe_text(col).strip().casefold()
+        if key in {"class / group", "class/group", "group", "class", "group name"}:
+            rename_map[col] = "group"
+        elif key in {"access code", "code"}:
+            rename_map[col] = "code"
+    df = df.rename(columns=rename_map)
+    if "group" not in df.columns:
+        df["group"] = ""
+    if "code" not in df.columns:
+        df["code"] = ""
+
+    rules = []
+    errors = []
+    seen_groups = set()
+    seen_codes = set()
+
+    for row_no, row in enumerate(df.to_dict("records"), start=1):
+        group = safe_text(row.get("group")).strip()
+        code = safe_text(row.get("code")).strip().upper().replace(" ", "")
+        if not group and not code:
+            continue
+        if not group:
+            errors.append(f"Row {row_no}: enter a class/group name, or delete the row.")
+            continue
+        if not code:
+            code = generate_access_code()
+
+        group_key = group.casefold()
+        code_key = code.casefold()
+        if group_key in seen_groups:
+            errors.append(f"Row {row_no}: class/group '{group}' is duplicated.")
+            continue
+        if code_key in seen_codes:
+            errors.append(f"Row {row_no}: access code '{code}' is duplicated.")
+            continue
+
+        seen_groups.add(group_key)
+        seen_codes.add(code_key)
+        rules.append({"group": group, "code": code})
+
+    return rules, errors
 
 def parse_group_lines(text_value):
     """Parse one 'Group name | access code' rule per line."""
@@ -1111,17 +1181,28 @@ def teacher_assignment_page():
             placeholder="Example: Post-editing Task 1",
         )
 
-        audience_lines = st.text_area(
-            "Assigned classes / groups",
-            placeholder=(
-                "One group per line using: Group name | access code\n"
-                "Example:\nTRS430-A | A7K9Q\nTRS430-B | B4M2P"
-            ),
-            height=120,
-            help=(
-                "Students must enter the matching access code before they can see the exercise. "
-                "Leave blank only if the exercise should be visible to every student."
-            ),
+        st.markdown("**Assigned classes / groups**")
+        st.caption(
+            "Add one row for each class or group. You may type your own access code or leave "
+            "the code blank and EduApp will generate one automatically. Leave the whole table "
+            "blank only if the exercise should be visible to all students."
+        )
+        audience_editor = st.data_editor(
+            pd.DataFrame(columns=["Class / group", "Access code"]),
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            key="create_assignment_audience_editor",
+            column_config={
+                "Class / group": st.column_config.TextColumn(
+                    "Class / group",
+                    help="Example: TRS430-A",
+                ),
+                "Access code": st.column_config.TextColumn(
+                    "Access code",
+                    help="Optional. Leave blank to generate a code automatically.",
+                ),
+            },
         )
 
         instructions = st.text_area(
@@ -1169,7 +1250,7 @@ def teacher_assignment_page():
         submitted = st.form_submit_button("Create Assignment")
 
         if submitted:
-            audience_rules, audience_errors = parse_group_lines(audience_lines)
+            audience_rules, audience_errors = audience_rules_from_editor(audience_editor)
             if not creator_name.strip():
                 st.error("Please enter the lecturer / creator name above.")
             elif not title.strip():
@@ -1177,7 +1258,7 @@ def teacher_assignment_page():
             elif not source_text.strip():
                 st.error("Please enter the source text.")
             elif audience_errors:
-                st.error("Please fix the class/group access rules:")
+                st.error("Please check the class/group table:")
                 for error in audience_errors:
                     st.write(f"- {error}")
             else:
@@ -1197,8 +1278,29 @@ def teacher_assignment_page():
                 }
 
                 save_assignment(assignment)
+                st.session_state["last_created_assignment_codes"] = {
+                    "title": title.strip(),
+                    "rules": audience_rules,
+                }
                 st.success("Assignment created successfully.")
                 st.rerun()
+
+    last_created = st.session_state.pop("last_created_assignment_codes", None)
+    if last_created:
+        st.success(f"Created: {last_created.get('title', 'Assignment')}")
+        rules = last_created.get("rules") or []
+        if rules:
+            st.markdown("### Codes to give your students")
+            st.caption("Give each class only its own code.")
+            st.dataframe(
+                pd.DataFrame(
+                    [{"Class / group": r.get("group", ""), "Access code": r.get("code", "")} for r in rules]
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.info("This assignment is visible to all students; no access code is required.")
 
     st.divider()
     st.subheader("Existing Assignments")
@@ -1286,11 +1388,30 @@ def teacher_assignment_page():
         with st.form("edit_assignment_form"):
             edit_course = st.text_input("Course name", value=safe_text(selected_row.get("course")))
             edit_title = st.text_input("Assignment title", value=safe_text(selected_row.get("title")))
-            edit_audience_lines = st.text_area(
-                "Assigned classes / groups",
-                value=current_rules_text,
-                height=120,
-                help="One group per line using: Group name | access code",
+            st.markdown("**Assigned classes / groups**")
+            st.caption(
+                "Edit the table directly. Add or delete rows as needed. If you leave an access "
+                "code blank, EduApp will generate a new one when you save."
+            )
+            edit_audience_editor = st.data_editor(
+                pd.DataFrame(
+                    [
+                        {"Class / group": rule.get("group", ""), "Access code": rule.get("code", "")}
+                        for rule in selected_rules
+                    ],
+                    columns=["Class / group", "Access code"],
+                ),
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                key=f"edit_assignment_audience_editor_{selected_assignment_id}",
+                column_config={
+                    "Class / group": st.column_config.TextColumn("Class / group"),
+                    "Access code": st.column_config.TextColumn(
+                        "Access code",
+                        help="Leave blank to generate a new access code automatically.",
+                    ),
+                },
             )
             edit_instructions = st.text_area(
                 "Instructions for students", value=safe_text(selected_row.get("instructions")), height=120
@@ -1321,13 +1442,13 @@ def teacher_assignment_page():
             save_changes = st.form_submit_button("Save Changes")
 
             if save_changes:
-                edited_rules, edited_errors = parse_group_lines(edit_audience_lines)
+                edited_rules, edited_errors = audience_rules_from_editor(edit_audience_editor)
                 if not edit_title.strip():
                     st.error("Please enter an assignment title.")
                 elif not edit_source.strip():
                     st.error("Please enter the source text.")
                 elif edited_errors:
-                    st.error("Please fix the class/group access rules:")
+                    st.error("Please check the class/group table:")
                     for error in edited_errors:
                         st.write(f"- {error}")
                 else:
