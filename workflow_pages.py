@@ -287,12 +287,27 @@ def parse_audience_rules(value):
         if not isinstance(item, dict):
             continue
         group = safe_text(item.get("group"))
-        code = safe_text(item.get("code"))
+        code = normalize_access_code(item.get("code"))
         if group and code:
             rules.append({"group": group, "code": code})
     return rules
 
 
+
+
+
+def normalize_access_code(value):
+    """Normalize access codes as text so numeric codes like 123 stay '123'."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).strip().upper().replace(" ", "")
 
 
 def generate_access_code(length=6):
@@ -337,7 +352,7 @@ def audience_rules_from_editor(editor_value):
 
     for row_no, row in enumerate(df.to_dict("records"), start=1):
         group = safe_text(row.get("group")).strip()
-        code = safe_text(row.get("code")).strip().upper().replace(" ", "")
+        code = normalize_access_code(row.get("code"))
         if not group and not code:
             continue
         if not group:
@@ -359,30 +374,6 @@ def audience_rules_from_editor(editor_value):
         seen_codes.add(code_key)
         rules.append({"group": group, "code": code})
 
-    return rules, errors
-
-def parse_group_lines(text_value):
-    """Parse one 'Group name | access code' rule per line."""
-    rules = []
-    errors = []
-    seen_codes = set()
-    for line_no, raw_line in enumerate(safe_text(text_value).splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-        if "|" not in line:
-            errors.append(f"Line {line_no}: use Group name | access code")
-            continue
-        group, code = [part.strip() for part in line.split("|", 1)]
-        if not group or not code:
-            errors.append(f"Line {line_no}: both group name and access code are required")
-            continue
-        code_key = code.casefold()
-        if code_key in seen_codes:
-            errors.append(f"Line {line_no}: access code '{code}' is duplicated")
-            continue
-        seen_codes.add(code_key)
-        rules.append({"group": group, "code": code})
     return rules, errors
 
 
@@ -1553,7 +1544,7 @@ def student_assignment_page():
         if not student_access_code:
             return False
         return any(
-            safe_text(rule.get("code")).casefold() == student_access_code.casefold()
+            normalize_access_code(rule.get("code")).casefold() == normalize_access_code(student_access_code).casefold()
             for rule in rules
         )
 
@@ -1601,7 +1592,7 @@ def student_assignment_page():
         (
             rule.get("group")
             for rule in selected_rules
-            if safe_text(rule.get("code")).casefold() == student_access_code.casefold()
+            if normalize_access_code(rule.get("code")).casefold() == normalize_access_code(student_access_code).casefold()
         ),
         "",
     )
