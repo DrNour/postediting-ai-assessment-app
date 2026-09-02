@@ -413,11 +413,44 @@ st.sidebar.header("Filters")
 
 filtered_df = df.copy()
 
+# Assignment/task selector: choose exactly which exercises feed every analysis and export.
+if "assignment_title" in filtered_df.columns:
+    task_labels = []
+    label_to_key = {}
+    task_frame = filtered_df[[c for c in ["assignment_id", "assignment_title", "task_type"] if c in filtered_df.columns]].drop_duplicates()
+    for _, row in task_frame.iterrows():
+        assignment_id = safe_text(row.get("assignment_id"))
+        title = safe_text(row.get("assignment_title")) or "Untitled assignment"
+        task_label = task_type_label(row.get("task_type")) if "task_type" in row.index else "Task"
+        label = f"{title} — {task_label}" + (f" — ID {assignment_id}" if assignment_id else "")
+        key = (assignment_id, title, safe_text(row.get("task_type")))
+        task_labels.append(label)
+        label_to_key[label] = key
+
+    selected_task_labels = st.sidebar.multiselect(
+        "Select assignments/tasks for analysis & download",
+        task_labels,
+        default=task_labels,
+        help="Deselect any exercises you do not want included in the analytics or exported files.",
+    )
+
+    if selected_task_labels:
+        selected_keys = {label_to_key[label] for label in selected_task_labels}
+        def _row_selected(row):
+            key = (
+                safe_text(row.get("assignment_id")),
+                safe_text(row.get("assignment_title")),
+                safe_text(row.get("task_type")),
+            )
+            return key in selected_keys
+        filtered_df = filtered_df[filtered_df.apply(_row_selected, axis=1)]
+    else:
+        filtered_df = filtered_df.iloc[0:0]
+
 candidate_filter_columns = [
     "task_label",
     "semester",
     "group_name",
-    "assignment_title",
     "assignment_code",
     "task_id",
     "student_id",
@@ -1690,8 +1723,7 @@ with tabs[10]:
                 "task_type",
                 "assignment_code",
                 "task_id",
-                "assignment_title",
-                "group_name",
+                            "group_name",
                 "semester",
                 "domain",
                 "editing_time_seconds",

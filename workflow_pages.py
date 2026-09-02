@@ -1,4 +1,5 @@
 import io
+import json
 import zipfile
 import difflib
 import html
@@ -228,6 +229,77 @@ def save_assignment(assignment):
         st.write("Supabase error:")
         st.code(str(error))
         st.stop()
+
+
+def delete_assignment(assignment_id):
+    """Delete an assignment while preserving already-submitted research records."""
+    try:
+        # Drafts are unfinished work tied to the exercise and should disappear with it.
+        try:
+            get_supabase_client().table("student_drafts").delete().eq(
+                "assignment_id", safe_text(assignment_id)
+            ).execute()
+        except Exception:
+            pass
+
+        return (
+            get_supabase_client().table("assignments")
+            .delete()
+            .eq("assignment_id", safe_text(assignment_id))
+            .execute()
+        )
+    except Exception as error:
+        st.error("Could not delete the assignment from Supabase.")
+        st.code(str(error))
+        return None
+
+
+def parse_audience_rules(value):
+    """Return normalized [{group, code}] audience rules from JSON/list values."""
+    if value is None or value == "":
+        return []
+    data = value
+    if isinstance(value, str):
+        try:
+            data = json.loads(value)
+        except Exception:
+            return []
+    if not isinstance(data, list):
+        return []
+    rules = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        group = safe_text(item.get("group"))
+        code = safe_text(item.get("code"))
+        if group and code:
+            rules.append({"group": group, "code": code})
+    return rules
+
+
+def parse_group_lines(text_value):
+    """Parse one 'Group name | access code' rule per line."""
+    rules = []
+    errors = []
+    seen_codes = set()
+    for line_no, raw_line in enumerate(safe_text(text_value).splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "|" not in line:
+            errors.append(f"Line {line_no}: use Group name | access code")
+            continue
+        group, code = [part.strip() for part in line.split("|", 1)]
+        if not group or not code:
+            errors.append(f"Line {line_no}: both group name and access code are required")
+            continue
+        code_key = code.casefold()
+        if code_key in seen_codes:
+            errors.append(f"Line {line_no}: access code '{code}' is duplicated")
+            continue
+        seen_codes.add(code_key)
+        rules.append({"group": group, "code": code})
+    return rules, errors
 
 
 def load_submissions():
@@ -991,18 +1063,51 @@ def teacher_assignment_page():
         return
 
     st.divider()
+    st.subheader("Lecturer Identity")
+    st.caption(
+        "Assignments store the creator's identity so colleagues can see who created each exercise."
+    )
+    ident_col1, ident_col2 = st.columns(2)
+    with ident_col1:
+        creator_name = st.text_input(
+            "Lecturer / creator name",
+            value=st.session_state.get("eduapp_creator_name", ""),
+            placeholder="Example: Dr Nour Abdelaal",
+        )
+    with ident_col2:
+        creator_email = st.text_input(
+            "Lecturer email or staff ID",
+            value=st.session_state.get("eduapp_creator_email", ""),
+            placeholder="Example: nour@university.edu",
+        )
+    st.session_state["eduapp_creator_name"] = creator_name.strip()
+    st.session_state["eduapp_creator_email"] = creator_email.strip()
 
+    st.divider()
     st.subheader("Create a New Assignment")
 
     with st.form("create_assignment_form"):
         course = st.text_input(
             "Course name",
-            placeholder="Example: Translation Studies",
+            placeholder="Example: TRS430",
         )
 
         title = st.text_input(
             "Assignment title",
             placeholder="Example: Post-editing Task 1",
+        )
+
+        audience_lines = st.text_area(
+            "Assigned classes / groups",
+            placeholder=(
+                "One group per line using: Group name | access code\n"
+                "Example:\nTRS430-A | A7K9Q\nTRS430-B | B4M2P"
+            ),
+            height=120,
+            help=(
+                "Students must enter the matching access code before they can see the exercise. "
+                "Leave blank only if the exercise should be visible to every student."
+            ),
         )
 
         instructions = st.text_area(
@@ -1043,17 +1148,24 @@ def teacher_assignment_page():
         )
 
         active = st.checkbox(
-            "Make this assignment visible to students",
+            "Make this assignment visible to eligible students",
             value=True,
         )
 
         submitted = st.form_submit_button("Create Assignment")
 
         if submitted:
-            if not title.strip():
+            audience_rules, audience_errors = parse_group_lines(audience_lines)
+            if not creator_name.strip():
+                st.error("Please enter the lecturer / creator name above.")
+            elif not title.strip():
                 st.error("Please enter an assignment title.")
             elif not source_text.strip():
                 st.error("Please enter the source text.")
+            elif audience_errors:
+                st.error("Please fix the class/group access rules:")
+                for error in audience_errors:
+                    st.write(f"- {error}")
             else:
                 assignment = {
                     "course": course.strip(),
@@ -1065,6 +1177,9 @@ def teacher_assignment_page():
                     "due_date": str(due_date),
                     "max_score": float(max_score),
                     "active": bool(active),
+                    "created_by_name": creator_name.strip(),
+                    "created_by_email": creator_email.strip(),
+                    "audience_rules": audience_rules,
                 }
 
                 save_assignment(assignment)
@@ -1072,43 +1187,76 @@ def teacher_assignment_page():
                 st.rerun()
 
     st.divider()
-
     st.subheader("Existing Assignments")
 
     assignments = load_assignments()
 
     if assignments.empty:
         st.info("No assignments created yet.")
-    else:
-        if "machine_translation" in assignments.columns:
-            assignments = assignments.copy()
-            assignments["student_modes"] = assignments["machine_translation"].apply(
-                lambda value: (
-                    "Translation or post-editing"
-                    if safe_text(value)
-                    else "Translation only"
-                )
-            )
+        return
 
-        display_columns = [
-            "created_at",
-            "course",
-            "title",
-            "student_modes",
-            "due_date",
-            "max_score",
-            "active",
-        ]
-
-        available_columns = [
-            column for column in display_columns if column in assignments.columns
-        ]
-
-        st.dataframe(
-            assignments[available_columns],
-            use_container_width=True,
-            hide_index=True,
+    assignments = assignments.copy()
+    if "machine_translation" in assignments.columns:
+        assignments["student_modes"] = assignments["machine_translation"].apply(
+            lambda value: "Translation or post-editing" if safe_text(value) else "Translation only"
         )
+
+    if "audience_rules" in assignments.columns:
+        assignments["assigned_groups"] = assignments["audience_rules"].apply(
+            lambda value: ", ".join(rule["group"] for rule in parse_audience_rules(value))
+            or "All students"
+        )
+    else:
+        assignments["assigned_groups"] = "All students"
+
+    display_columns = [
+        "created_at",
+        "created_by_name",
+        "created_by_email",
+        "course",
+        "title",
+        "assigned_groups",
+        "student_modes",
+        "due_date",
+        "max_score",
+        "active",
+    ]
+    available_columns = [column for column in display_columns if column in assignments.columns]
+    st.dataframe(assignments[available_columns], use_container_width=True, hide_index=True)
+
+    st.markdown("### Delete an Assignment")
+    st.warning(
+        "Deleting removes the exercise from the assignment list and deletes unfinished drafts. "
+        "Already-submitted student records are preserved for grading and research."
+    )
+    labels = {}
+    for _, row in assignments.iterrows():
+        assignment_id = safe_text(row.get("assignment_id"))
+        label = (
+            f"{safe_text(row.get('title')) or 'Untitled'} — "
+            f"{safe_text(row.get('course')) or 'No course'} — "
+            f"created by {safe_text(row.get('created_by_name')) or 'Legacy/unknown'} — "
+            f"ID {assignment_id}"
+        )
+        labels[label] = assignment_id
+
+    selected_delete_label = st.selectbox(
+        "Choose assignment to delete",
+        list(labels.keys()),
+        key="delete_assignment_choice",
+    )
+    confirm_delete = st.checkbox(
+        "I understand that this removes the exercise from student access.",
+        key="delete_assignment_confirm",
+    )
+    if st.button("Delete selected assignment", type="primary"):
+        if not confirm_delete:
+            st.error("Tick the confirmation box before deleting.")
+        else:
+            result = delete_assignment(labels[selected_delete_label])
+            if result is not None:
+                st.success("Assignment deleted. Existing submissions were preserved.")
+                st.rerun()
 
 
 # ============================================================
@@ -1137,10 +1285,42 @@ def student_assignment_page():
         .str.lower()
         .isin({"true", "1", "yes"})
     )
-    active_assignments = assignments[active_mask]
+    active_assignments = assignments[active_mask].copy()
 
     if active_assignments.empty:
         st.info("No active assignments are currently available.")
+        return
+
+    st.markdown("### Class / Group Access")
+    student_access_code = st.text_input(
+        "Class or group access code",
+        type="password",
+        placeholder="Enter the code provided by your lecturer",
+        help="Only assignments assigned to your class/group will be shown.",
+        key="student_assignment_access_code",
+    ).strip()
+
+    def _student_can_access(row):
+        rules = parse_audience_rules(row.get("audience_rules")) if "audience_rules" in row.index else []
+        if not rules:
+            # Backward compatibility: assignments created before group controls remain public.
+            return True
+        if not student_access_code:
+            return False
+        return any(
+            safe_text(rule.get("code")).casefold() == student_access_code.casefold()
+            for rule in rules
+        )
+
+    active_assignments = active_assignments[
+        active_assignments.apply(_student_can_access, axis=1)
+    ]
+
+    if active_assignments.empty:
+        if student_access_code:
+            st.warning("No active assignments are assigned to this class/group access code.")
+        else:
+            st.info("Enter your class/group access code to view assigned exercises.")
         return
 
     label_to_id = {}
@@ -1171,6 +1351,17 @@ def student_assignment_page():
 
     st.write(f"**Due date:** {safe_text(selected_assignment.get('due_date')) or 'Not set'}")
     st.write(f"**Maximum score:** {selected_assignment.get('max_score')}")
+    selected_rules = parse_audience_rules(selected_assignment.get("audience_rules"))
+    matched_group = next(
+        (
+            rule.get("group")
+            for rule in selected_rules
+            if safe_text(rule.get("code")).casefold() == student_access_code.casefold()
+        ),
+        "",
+    )
+    if matched_group:
+        st.write(f"**Class / group:** {matched_group}")
 
     if safe_text(selected_assignment.get("instructions")):
         st.markdown("### Instructions")
@@ -1505,6 +1696,7 @@ def student_assignment_page():
                 "task_type": normalize_task_type(task_type),
                 "student_id": student_id.strip(),
                 "student_name": student_name.strip(),
+                "group_name": matched_group,
                 "source_text": source_text,
                 # The MT may remain stored for teacher/research comparison, but it is hidden
                 # from students in Translation mode.
