@@ -231,6 +231,20 @@ def save_assignment(assignment):
         st.stop()
 
 
+def update_assignment(assignment_id, updates):
+    try:
+        return (
+            get_supabase_client().table("assignments")
+            .update(updates)
+            .eq("assignment_id", safe_text(assignment_id))
+            .execute()
+        )
+    except Exception as error:
+        st.error("Could not update the assignment in Supabase.")
+        st.code(str(error))
+        return None
+
+
 def delete_assignment(assignment_id):
     """Delete an assignment while preserving already-submitted research records."""
     try:
@@ -1223,6 +1237,116 @@ def teacher_assignment_page():
     ]
     available_columns = [column for column in display_columns if column in assignments.columns]
     st.dataframe(assignments[available_columns], use_container_width=True, hide_index=True)
+
+    st.markdown("### View Access Codes and Edit an Assignment")
+    st.caption(
+        "Select an exercise to see the exact class/group codes you can give students, "
+        "or update the exercise after creation."
+    )
+
+    edit_labels = {}
+    for _, row in assignments.iterrows():
+        assignment_id = safe_text(row.get("assignment_id"))
+        edit_label = (
+            f"{safe_text(row.get('title')) or 'Untitled'} — "
+            f"{safe_text(row.get('course')) or 'No course'} — "
+            f"created by {safe_text(row.get('created_by_name')) or 'Legacy/unknown'} — "
+            f"ID {assignment_id}"
+        )
+        edit_labels[edit_label] = assignment_id
+
+    selected_edit_label = st.selectbox(
+        "Choose assignment to view or edit",
+        list(edit_labels.keys()),
+        key="edit_assignment_choice",
+    )
+    selected_assignment_id = edit_labels[selected_edit_label]
+    selected_row = assignments[
+        assignments["assignment_id"].astype(str) == str(selected_assignment_id)
+    ].iloc[0]
+
+    selected_rules = parse_audience_rules(selected_row.get("audience_rules"))
+    if selected_rules:
+        st.markdown("#### Student access codes")
+        for rule in selected_rules:
+            st.code(f"{safe_text(rule.get('group'))} | {safe_text(rule.get('code'))}")
+        st.info("Give each class only its own access code. Students use that code on the Student Assignments page.")
+    else:
+        st.info("This assignment is currently visible to all students and does not require an access code.")
+
+    with st.expander("Edit selected assignment", expanded=False):
+        current_rules_text = "\n".join(
+            f"{safe_text(rule.get('group'))} | {safe_text(rule.get('code'))}"
+            for rule in selected_rules
+        )
+        current_due = pd.to_datetime(selected_row.get("due_date"), errors="coerce")
+        if pd.isna(current_due):
+            current_due = pd.Timestamp.today()
+
+        with st.form("edit_assignment_form"):
+            edit_course = st.text_input("Course name", value=safe_text(selected_row.get("course")))
+            edit_title = st.text_input("Assignment title", value=safe_text(selected_row.get("title")))
+            edit_audience_lines = st.text_area(
+                "Assigned classes / groups",
+                value=current_rules_text,
+                height=120,
+                help="One group per line using: Group name | access code",
+            )
+            edit_instructions = st.text_area(
+                "Instructions for students", value=safe_text(selected_row.get("instructions")), height=120
+            )
+            edit_source = st.text_area(
+                "Source text", value=safe_text(selected_row.get("source_text")), height=180
+            )
+            edit_mt = st.text_area(
+                "Raw machine translation", value=safe_text(selected_row.get("machine_translation")), height=180
+            )
+            edit_reference = st.text_area(
+                "Reference translation / model answer",
+                value=safe_text(selected_row.get("reference_translation")),
+                height=180,
+            )
+            edit_due = st.date_input("Due date", value=current_due.date())
+            edit_max_score = st.number_input(
+                "Maximum score",
+                min_value=1.0,
+                max_value=100.0,
+                value=float(selected_row.get("max_score") or 10.0),
+                step=0.5,
+            )
+            edit_active = st.checkbox(
+                "Make this assignment visible to eligible students",
+                value=str(selected_row.get("active")).strip().lower() in {"true", "1", "yes"},
+            )
+            save_changes = st.form_submit_button("Save Changes")
+
+            if save_changes:
+                edited_rules, edited_errors = parse_group_lines(edit_audience_lines)
+                if not edit_title.strip():
+                    st.error("Please enter an assignment title.")
+                elif not edit_source.strip():
+                    st.error("Please enter the source text.")
+                elif edited_errors:
+                    st.error("Please fix the class/group access rules:")
+                    for error in edited_errors:
+                        st.write(f"- {error}")
+                else:
+                    updates = {
+                        "course": edit_course.strip(),
+                        "title": edit_title.strip(),
+                        "instructions": edit_instructions.strip(),
+                        "source_text": edit_source.strip(),
+                        "machine_translation": edit_mt.strip(),
+                        "reference_translation": edit_reference.strip(),
+                        "due_date": str(edit_due),
+                        "max_score": float(edit_max_score),
+                        "active": bool(edit_active),
+                        "audience_rules": edited_rules,
+                    }
+                    result = update_assignment(selected_assignment_id, updates)
+                    if result is not None:
+                        st.success("Assignment updated successfully.")
+                        st.rerun()
 
     st.markdown("### Delete an Assignment")
     st.warning(
