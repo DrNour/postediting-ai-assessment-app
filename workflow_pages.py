@@ -34,15 +34,14 @@ def install_student_paste_guard():
     """Apply browser-side integrity controls to assessed response boxes.
 
     The guard blocks paste/drop and common dictation-style insertion events. On
-    phones and tablets the assessed response boxes are made read-only so students
-    must complete the task on a desktop/laptop. This remains a deterrent rather
+    tablets and iPads remain available for normal typing. Phones stay read-only. This remains a deterrent rather
     than a mathematically foolproof proctoring mechanism: operating-system tools
     can sometimes make dictated text look like ordinary keyboard input.
     """
     st.info(
         "Academic integrity mode is active: paste, drag/drop, and detected voice "
         "dictation are blocked. Assessed responses must be completed on a "
-        "desktop/laptop and typed directly into the app."
+        "desktop, laptop, iPad, or tablet. Phone input remains disabled."
     )
 
     guard_js = r"""
@@ -59,8 +58,11 @@ def install_student_paste_guard():
       }
 
       const protectedLabels = new Set(["Translation box", "Post-editing box"]);
-      const mobileRe = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|Tablet/i;
-      const isMobile = mobileRe.test((rootWin.navigator && rootWin.navigator.userAgent) || "");
+      const ua = (rootWin.navigator && rootWin.navigator.userAgent) || "";
+      const isIPad = /iPad/i.test(ua) || (/Macintosh/i.test(ua) && rootWin.navigator && rootWin.navigator.maxTouchPoints > 1);
+      const isAndroidTablet = /Android/i.test(ua) && !/Mobile/i.test(ua);
+      const isTablet = isIPad || isAndroidTablet || /Tablet/i.test(ua);
+      const isPhone = !isTablet && /Android.*Mobile|iPhone|iPod|webOS|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
 
       const isProtected = (el) =>
         el && el.tagName === "TEXTAREA" && protectedLabels.has(el.getAttribute("aria-label"));
@@ -112,13 +114,13 @@ def install_student_paste_guard():
 
         // Strongest practical protection against phone-keyboard dictation:
         // assessed response entry is disabled on phones/tablets.
-        if (isMobile) {
+        if (isPhone) {
           el.readOnly = true;
           el.setAttribute("inputmode", "none");
-          el.setAttribute("placeholder", "Use a desktop or laptop for this assessed task.");
+          el.setAttribute("placeholder", "Use a desktop, laptop, iPad, or tablet for this assessed task.");
           addMessage(
             el,
-            "Phone/tablet input is disabled for this assessed task. Please use a desktop or laptop.",
+            "Phone input is disabled for this assessed task. Please use a desktop, laptop, iPad, or tablet.",
             "mobile"
           );
         }
