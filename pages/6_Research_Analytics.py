@@ -395,6 +395,102 @@ def clean_analysis_df(df):
     return cleaned
 
 
+def nonempty_text_mask(df, column):
+    """Return a boolean mask for rows containing usable text in *column*."""
+    if column not in df.columns:
+        return pd.Series(False, index=df.index)
+    values = df[column]
+    return values.notna() & values.astype(str).str.strip().ne("") & ~values.astype(str).str.lower().isin(["nan", "none"])
+
+
+def metric_availability_report(df):
+    """Explain which automatic text metrics are populated and why others are unavailable."""
+    n_rows = len(df)
+    output_mask = nonempty_text_mask(df, "post_edited_text")
+    mt_mask = nonempty_text_mask(df, "machine_translation")
+    ref_mask = nonempty_text_mask(df, "reference_translation")
+
+    families = [
+        {
+            "family": "MT → student output / post-editing effort",
+            "metrics": [
+                "mt_pe_cosine_similarity", "mt_pe_edit_distance_ratio", "mt_pe_length_ratio",
+                "mt_pe_bleu", "mt_pe_chrf", "mt_pe_ter", "mt_pe_bertscore_f1",
+                "mt_pe_lexical_similarity", "mt_pe_change_ratio", "mt_pe_overlap_bleu",
+                "mt_pe_overlap_chrf", "mt_pe_overlap_ter",
+            ],
+            "eligible": output_mask & mt_mask,
+            "requirement": "machine translation + student output",
+        },
+        {
+            "family": "Student output → reference quality",
+            "metrics": [
+                "pe_reference_cosine_similarity", "pe_reference_length_ratio",
+                "pe_reference_bleu", "pe_reference_chrf", "pe_reference_ter",
+                "pe_reference_bertscore_f1", "pe_quality_bleu", "pe_quality_chrf",
+                "pe_quality_ter", "pe_quality_bertscore_f1", "pe_quality_comet",
+                "ht_quality_bleu", "ht_quality_chrf", "ht_quality_ter",
+                "ht_quality_bertscore_f1", "ht_quality_comet",
+            ],
+            "eligible": output_mask & ref_mask,
+            "requirement": "student output + independent reference translation",
+        },
+        {
+            "family": "Raw MT → reference quality",
+            "metrics": [
+                "raw_mt_quality_bleu", "raw_mt_quality_chrf", "raw_mt_quality_ter",
+                "raw_mt_quality_bertscore_f1", "raw_mt_quality_comet",
+            ],
+            "eligible": mt_mask & ref_mask,
+            "requirement": "machine translation + independent reference translation",
+        },
+    ]
+
+    rows = []
+    for spec in families:
+        existing_metrics = [m for m in spec["metrics"] if m in df.columns]
+        populated_cells = sum(pd.to_numeric(df[m], errors="coerce").notna().sum() for m in existing_metrics)
+        total_cells = n_rows * len(existing_metrics) if existing_metrics else 0
+        eligible_rows = int(spec["eligible"].sum())
+        if not existing_metrics:
+            status = "Not configured"
+            reason = "Metric columns are not present in this dataset/schema."
+        elif eligible_rows == 0:
+            status = "Unavailable"
+            missing = []
+            if "machine translation" in spec["requirement"] and int(mt_mask.sum()) == 0:
+                missing.append("machine translation")
+            if "reference translation" in spec["requirement"] and int(ref_mask.sum()) == 0:
+                missing.append("reference translation")
+            if "student output" in spec["requirement"] and int(output_mask.sum()) == 0:
+                missing.append("student output")
+            reason = "Missing required text: " + ", ".join(missing) if missing else "No selected row contains all required comparison texts."
+        elif populated_cells == 0:
+            status = "Eligible but not calculated"
+            reason = "Required comparison texts exist, but the saved metric fields are empty. Recalculate metrics or check advanced-metric dependencies."
+        else:
+            status = "Available"
+            reason = "Saved metric values are present."
+
+        rows.append({
+            "Metric family": spec["family"],
+            "Status": status,
+            "Eligible rows": eligible_rows,
+            "Selected rows": n_rows,
+            "Metric columns": len(existing_metrics),
+            "Populated metric cells": int(populated_cells),
+            "Population %": round((100 * populated_cells / total_cells), 1) if total_cells else 0.0,
+            "What is required": spec["requirement"],
+            "Explanation": reason,
+        })
+
+    return pd.DataFrame(rows), {
+        "student_output_rows": int(output_mask.sum()),
+        "machine_translation_rows": int(mt_mask.sum()),
+        "reference_translation_rows": int(ref_mask.sum()),
+    }
+
+
 df = clean_analysis_df(raw_df)
 
 numeric_columns = get_numeric_columns(df)
@@ -511,6 +607,7 @@ tabs = st.tabs(
         "PCA / Clustering",
         "Reliability",
         "Export",
+        "Metric Availability",
     ]
 )
 
@@ -538,6 +635,16 @@ with tabs[0]:
             )
         else:
             st.metric("Unique students", "N/A")
+
+    availability_df, availability_counts = metric_availability_report(filtered_df)
+    unavailable_count = int((availability_df["Status"] != "Available").sum())
+    if unavailable_count:
+        st.warning(
+            f"{unavailable_count} automatic metric family/families are unavailable or incomplete for the selected data. "
+            "Open the Metric Availability tab to see exactly what is missing and why."
+        )
+    else:
+        st.success("Automatic text-metric families contain saved values for the selected data.")
 
     if "task_type" in filtered_df.columns:
         task_counts = (
@@ -1767,3 +1874,57 @@ with tabs[10]:
         "test statistics, p-values, effect sizes, correction method for multiple "
         "comparisons, and whether cross-validation was grouped by student."
     )
+
+# ============================================================
+# Metric availability diagnostics
+# ============================================================
+
+with tabs[11]:
+    st.header("Automatic Metric Availability")
+    st.write(
+        "This panel distinguishes a genuinely unavailable metric from an empty saved field. "
+        "It checks the texts required for each comparison in the currently selected assignments/tasks."
+    )
+
+    availability_df, availability_counts = metric_availability_report(filtered_df)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Selected submissions", len(filtered_df))
+    c2.metric("With student output", availability_counts["student_output_rows"])
+    c3.metric("With raw MT", availability_counts["machine_translation_rows"])
+    c4.metric("With reference", availability_counts["reference_translation_rows"])
+
+    st.subheader("Metric-family status")
+    st.dataframe(availability_df, use_container_width=True, hide_index=True)
+
+    st.subheader("How to make unavailable metrics usable")
+    st.markdown(
+        """
+- **Translation tasks:** provide an independent **reference translation** if you want student-output → reference quality metrics such as cosine similarity, BLEU, chrF, TER, BERTScore, or COMET.
+- **Post-editing tasks:** provide the **raw machine translation** to calculate MT → post-editing effort/similarity measures. Add a **reference translation** as well if you want post-edited-output quality metrics.
+- **Eligible but not calculated:** the required texts are present, but the saved metric columns are blank. This usually means the advanced metric pipeline/dependencies were not active when the submission was stored; the data should be recalculated rather than interpreted as a zero score.
+- **Unavailable is not zero:** blank values are intentionally treated as missing data, not as evidence of poor similarity or quality.
+        """
+    )
+
+    if "advanced_metrics_status" in filtered_df.columns:
+        st.subheader("Saved advanced-metrics status")
+        status_counts = (
+            filtered_df["advanced_metrics_status"]
+            .fillna("missing")
+            .astype(str)
+            .replace({"": "missing"})
+            .value_counts(dropna=False)
+            .rename_axis("advanced_metrics_status")
+            .reset_index(name="records")
+        )
+        st.dataframe(status_counts, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Download metric-availability report",
+        data=dataframe_to_csv_download(availability_df),
+        file_name="eduapp_metric_availability.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
