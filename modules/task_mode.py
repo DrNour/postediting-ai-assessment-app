@@ -5,15 +5,17 @@ from __future__ import annotations
 from typing import Any, MutableMapping
 
 TRANSLATION = "translation"
+ADAPTIVE_TRANSLATION = "adaptive_translation"
 POST_EDITING = "post_editing"
 
 TASK_OPTIONS = {
-    "Translate from the source text": TRANSLATION,
+    "Translate without AI": TRANSLATION,
+    "Adaptive translation with AI": ADAPTIVE_TRANSLATION,
     "Post-edit the machine translation": POST_EDITING,
 }
 
 # These values describe editing effort. They are not meaningful when a student
-# translates independently from the source text.
+# translates independently from the source text, whether unaided or with adaptive AI support.
 POST_EDITING_ONLY_METRIC_FIELDS = (
     "mt_pe_word_count_difference",
     "mt_pe_cosine_similarity",
@@ -42,17 +44,34 @@ POST_EDITING_ONLY_METRIC_FIELDS = (
 def normalize_task_type(value: Any) -> str:
     """Return a stable task identifier and preserve compatibility with old rows."""
     normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if normalized in {TRANSLATION, "translate", "human_translation"}:
+    if normalized in {TRANSLATION, "translate", "human_translation", "translation_without_ai"}:
         return TRANSLATION
+    if normalized in {
+        ADAPTIVE_TRANSLATION,
+        "adaptive",
+        "ai_translation",
+        "ai_assisted_translation",
+        "adaptive_ai_translation",
+    }:
+        return ADAPTIVE_TRANSLATION
     return POST_EDITING
 
 
 def is_translation(value: Any) -> bool:
-    return normalize_task_type(value) == TRANSLATION
+    return normalize_task_type(value) in {TRANSLATION, ADAPTIVE_TRANSLATION}
+
+
+def is_adaptive_translation(value: Any) -> bool:
+    return normalize_task_type(value) == ADAPTIVE_TRANSLATION
 
 
 def task_type_label(value: Any) -> str:
-    return "Translation" if is_translation(value) else "Post-editing"
+    normalized = normalize_task_type(value)
+    if normalized == ADAPTIVE_TRANSLATION:
+        return "Adaptive Translation (AI-assisted)"
+    if normalized == TRANSLATION:
+        return "Translation (No AI)"
+    return "Post-editing"
 
 
 def student_output_label(value: Any) -> str:
@@ -60,10 +79,17 @@ def student_output_label(value: Any) -> str:
 
 
 def task_instruction(value: Any) -> str:
-    if is_translation(value):
+    normalized = normalize_task_type(value)
+    if normalized == TRANSLATION:
         return (
-            "Translate the source text independently. The machine translation is hidden "
-            "so that it does not influence your wording."
+            "Translate the source text independently without AI assistance. The machine translation "
+            "is hidden so that it does not influence your wording."
+        )
+    if normalized == ADAPTIVE_TRANSLATION:
+        return (
+            "Translate the source text with the built-in adaptive AI assistant. Ask for terminology, "
+            "meaning, draft review, or next-segment guidance when you need it. You remain responsible "
+            "for the final translation and type the final wording yourself."
         )
     return (
         "Revise the raw machine translation. Correct meaning, terminology, grammar, "
@@ -76,7 +102,7 @@ def make_translation_metrics_task_appropriate(
     *,
     has_reference: bool,
 ) -> MutableMapping[str, Any]:
-    """Remove misleading post-editing-effort values from a translation result."""
+    """Remove misleading post-editing-effort values from either translation condition."""
     for field in POST_EDITING_ONLY_METRIC_FIELDS:
         results[field] = None
 

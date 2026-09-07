@@ -10,6 +10,7 @@ from collections import Counter
 
 import pandas as pd
 import streamlit as st
+from openai import OpenAI
 import streamlit.components.v1 as components
 from docx import Document
 from docx.shared import RGBColor
@@ -17,10 +18,12 @@ from supabase import create_client
 from metrics import compare_postedit_with_raw_mt, build_research_metrics_payload
 from modules.auth import require_teacher_access
 from modules.task_mode import (
+    ADAPTIVE_TRANSLATION,
     POST_EDITING,
     POST_EDITING_ONLY_METRIC_FIELDS,
     TRANSLATION,
     TASK_OPTIONS,
+    is_adaptive_translation,
     is_translation,
     make_translation_metrics_task_appropriate,
     normalize_task_type,
@@ -177,6 +180,76 @@ def install_student_paste_guard():
     # targets the parent Streamlit document. Height zero keeps it invisible.
     components.html(guard_js, height=0, width=0)
 
+
+
+def get_adaptive_translation_help(source_text, student_draft, help_type, student_question=''):
+    """Return on-demand AI assistance for the adaptive-translation condition.
+
+    The assistant supports the student's decision-making without writing directly
+    into the assessed response box. The final wording remains the student's work.
+    """
+    api_key = safe_text(st.secrets.get("OPENAI_API_KEY", ""))
+    if not api_key:
+        return None, "OPENAI_API_KEY is not configured in Streamlit Secrets."
+
+    model_name = safe_text(st.secrets.get("OPENAI_MODEL", "gpt-5-mini")) or "gpt-5-mini"
+    client = OpenAI(api_key=api_key)
+
+    help_instructions = {
+        "Terminology help": (
+            "Identify difficult or domain-specific terms in the source and give concise target-language "
+            "translation options with brief usage notes. Do not rewrite the entire translation."
+        ),
+        "Meaning / ambiguity help": (
+            "Explain ambiguous, idiomatic, or structurally difficult parts of the source. Offer alternative "
+            "interpretations where appropriate. Do not produce a complete translation."
+        ),
+        "Review my current draft": (
+            "Review the student's current translation for meaning, omissions, terminology, grammar, fluency, "
+            "and style. Point out specific issues and suggest local revisions rather than replacing the whole text."
+        ),
+        "Suggest the next segment": (
+            "Based on the source and the student's current draft, suggest how to translate only the next short "
+            "untranslated segment. Explain the choice briefly. Do not provide the full remaining translation."
+        ),
+    }
+
+    instruction = help_instructions.get(help_type, help_instructions["Terminology help"])
+    question = safe_text(student_question)
+    prompt = f"""
+You are an adaptive translation assistant inside a university translation-learning application.
+The student is deliberately in an AI-assisted translation condition.
+
+SOURCE TEXT:
+{safe_text(source_text)}
+
+STUDENT'S CURRENT DRAFT:
+{safe_text(student_draft) or '[No draft yet]'}
+
+TYPE OF HELP REQUESTED:
+{help_type}
+
+STUDENT QUESTION (if any):
+{question or '[None]'}
+
+TASK:
+{instruction}
+
+Keep the response concise, pedagogical, and directly useful. Distinguish clearly between explanations and suggested wording.
+"""
+
+    try:
+        response = client.responses.create(
+            model=model_name,
+            input=prompt,
+            max_output_tokens=700,
+        )
+        text = safe_text(getattr(response, "output_text", ""))
+        if not text:
+            return None, "The AI service returned no text."
+        return text, None
+    except Exception as error:
+        return None, f"AI assistance could not be generated: {error}"
 
 # ============================================================
 # Supabase connection
@@ -1628,9 +1701,12 @@ def student_assignment_page():
 
     available_task_labels = list(TASK_OPTIONS)
     if not raw_mt:
-        available_task_labels = ["Translate from the source text"]
+        available_task_labels = [
+            "Translate without AI",
+            "Adaptive translation with AI",
+        ]
         st.info(
-            "This assignment has no machine translation, so Translation is the only available mode."
+            "This assignment has no machine translation, so students can choose unaided translation or adaptive AI-assisted translation."
         )
 
     selected_task_label = st.radio(
@@ -1642,11 +1718,12 @@ def student_assignment_page():
     task_type = TASK_OPTIONS[selected_task_label]
     st.info(task_instruction(task_type))
 
-    answer_key = (
-        f"student_translation_{selected_assignment_id}"
-        if is_translation(task_type)
-        else f"student_post_edit_{selected_assignment_id}"
-    )
+    if is_adaptive_translation(task_type):
+        answer_key = f"student_adaptive_translation_{selected_assignment_id}"
+    elif is_translation(task_type):
+        answer_key = f"student_translation_{selected_assignment_id}"
+    else:
+        answer_key = f"student_post_edit_{selected_assignment_id}"
     default_answer = "" if is_translation(task_type) else raw_mt
     if answer_key not in st.session_state:
         st.session_state[answer_key] = default_answer
@@ -1705,6 +1782,50 @@ def student_assignment_page():
             "replaced_segments": None,
             "unchanged_words": None,
         }
+
+        if is_adaptive_translation(task_type):
+            st.markdown("### Adaptive AI Assistant")
+            st.caption(
+                "AI assistance is intentionally available in this condition. The assistant gives on-demand "
+                "guidance, while the final translation remains in your own response box."
+            )
+            ai_help_type = st.selectbox(
+                "What kind of help do you want?",
+                [
+                    "Terminology help",
+                    "Meaning / ambiguity help",
+                    "Review my current draft",
+                    "Suggest the next segment",
+                ],
+                key=f"adaptive_help_type_{selected_assignment_id}",
+            )
+            ai_question = st.text_input(
+                "Optional question for the AI assistant",
+                placeholder="Example: What does this phrase mean in context?",
+                key=f"adaptive_question_{selected_assignment_id}",
+            )
+            if st.button(
+                "Ask the adaptive AI assistant",
+                key=f"adaptive_ai_button_{selected_assignment_id}",
+            ):
+                with st.spinner("Generating adaptive translation support..."):
+                    ai_text, ai_error = get_adaptive_translation_help(
+                        source_text, student_answer, ai_help_type, ai_question
+                    )
+                if ai_error:
+                    st.error(ai_error)
+                else:
+                    st.session_state[f"adaptive_ai_response_{selected_assignment_id}"] = ai_text
+
+            adaptive_response = st.session_state.get(
+                f"adaptive_ai_response_{selected_assignment_id}", ""
+            )
+            if adaptive_response:
+                st.markdown("**AI guidance**")
+                st.info(adaptive_response)
+                st.caption(
+                    "Use the guidance critically. Type any revisions yourself in the assessed translation box."
+                )
     else:
         with work_col:
             st.markdown("### Post-edit the MT Output")
