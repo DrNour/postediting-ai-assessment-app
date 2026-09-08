@@ -191,7 +191,7 @@ def get_adaptive_translation_help(source_text, student_draft, help_type, student
     if not api_key:
         return None, "Gemini AI is not configured. Ask your lecturer to add GEMINI_API_KEY to Streamlit Secrets."
 
-    model_name = safe_text(st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash")) or "gemini-3.6-flash"
+    model_name = safe_text(st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")) or "gemini-2.5-flash"
     try:
         from google import genai
     except Exception:
@@ -238,14 +238,6 @@ STUDENT QUESTION (if any):
 
 TASK:
 {instruction}
-
-LANGUAGE RULE:
-This course uses English and Arabic only.
-- If the source text is primarily English, provide translation help in Arabic.
-- If the source text is primarily Arabic, provide translation help in English.
-- Never provide Spanish or any other target language.
-- Keep explanations concise and pedagogical, and make all suggested wording match the required English-Arabic direction.
-- Do not use markdown headings or heading-style formatting; use short plain paragraphs or bullets only.
 
 Keep the response concise, pedagogical, and directly useful. Distinguish clearly between explanations and suggested wording.
 """
@@ -2221,11 +2213,20 @@ def teacher_submissions_page():
 
     task_filter = st.selectbox(
         "Filter by task type",
-        ["All task types", "Translation", "Post-editing"],
+        [
+            "All task types",
+            "Translation - No AI",
+            "Adaptive Translation - AI-assisted",
+            "Post-editing",
+        ],
     )
     if task_filter != "All task types":
-        wanted = TRANSLATION if task_filter == "Translation" else POST_EDITING
-        filtered = filtered[filtered["task_type"] == wanted]
+        wanted_map = {
+            "Translation - No AI": TRANSLATION,
+            "Adaptive Translation - AI-assisted": ADAPTIVE_TRANSLATION,
+            "Post-editing": POST_EDITING,
+        }
+        filtered = filtered[filtered["task_type"] == wanted_map[task_filter]]
 
     if filtered.empty:
         st.info("No submissions match this assignment and task-type filter.")
