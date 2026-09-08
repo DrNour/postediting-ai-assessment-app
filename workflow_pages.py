@@ -191,7 +191,7 @@ def get_adaptive_translation_help(source_text, student_draft, help_type, student
     if not api_key:
         return None, "Gemini AI is not configured. Ask your lecturer to add GEMINI_API_KEY to Streamlit Secrets."
 
-    model_name = safe_text(st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")) or "gemini-2.5-flash"
+    model_name = safe_text(st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash")) or "gemini-3.6-flash"
     try:
         from google import genai
     except Exception:
