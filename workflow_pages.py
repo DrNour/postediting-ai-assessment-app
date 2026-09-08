@@ -191,7 +191,7 @@ def get_adaptive_translation_help(source_text, student_draft, help_type, student
     if not api_key:
         return None, "Gemini AI is not configured. Ask your lecturer to add GEMINI_API_KEY to Streamlit Secrets."
 
-    model_name = safe_text(st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash")) or "gemini-3.6-flash"
+    model_name = safe_text(st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")) or "gemini-2.5-flash"
     try:
         from google import genai
     except Exception:
@@ -242,27 +242,54 @@ TASK:
 Keep the response concise, pedagogical, and directly useful. Distinguish clearly between explanations and suggested wording.
 """
 
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-        )
-        text = safe_text(getattr(response, "text", ""))
-        if not text:
-            return None, "Gemini returned no text. Please try again."
-        return text, None
-    except Exception as error:
-        error_text = safe_text(error)
-        error_lower = error_text.lower()
-        if "429" in error_text or "quota" in error_lower or "resource_exhausted" in error_lower:
-            return None, "AI assistance is temporarily unavailable because the Gemini quota has been reached. Please continue translating independently and try again later."
+    import time
 
-        # Temporary lecturer-facing diagnostic: expose only a short, sanitized
-        # error summary so API/auth/model problems can be identified quickly.
-        # Never include the API key or full request payload.
-        diagnostic = error_text.replace(api_key, "[REDACTED]") if api_key else error_text
-        diagnostic = " ".join(diagnostic.split())[:500]
-        return None, f"Gemini diagnostic error: {diagnostic}"
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            text = safe_text(getattr(response, "text", ""))
+            if text:
+                return text, None
+            return None, "Gemini returned no text. Please try again."
+        except Exception as error:
+            error_text = safe_text(error)
+            error_lower = error_text.lower()
+
+            is_busy = (
+                "503" in error_text
+                or "unavailable" in error_lower
+                or "high demand" in error_lower
+            )
+            if is_busy:
+                if attempt < max_attempts - 1:
+                    time.sleep(2 + attempt * 2)
+                    continue
+                return None, (
+                    "The AI service is busy right now. Please try again in a moment. "
+                    "Your translation draft is still saved."
+                )
+
+            if (
+                "429" in error_text
+                or "quota" in error_lower
+                or "resource_exhausted" in error_lower
+            ):
+                return None, (
+                    "AI assistance is temporarily unavailable because the Gemini quota has been reached. "
+                    "Please continue translating independently and try again later."
+                )
+
+            # Keep a short diagnostic for configuration/auth/model errors while testing.
+            # Never include the API key or full request payload.
+            diagnostic = error_text.replace(api_key, "[REDACTED]") if api_key else error_text
+            diagnostic = " ".join(diagnostic.split())[:500]
+            return None, f"Gemini diagnostic error: {diagnostic}"
+
+    return None, "The AI service is busy right now. Please try again in a moment."
 
 # ============================================================
 # Supabase connection
