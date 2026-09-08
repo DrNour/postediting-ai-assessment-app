@@ -1,29 +1,22 @@
 import io
-import json
 import zipfile
 import difflib
 import html
 import math
-import secrets as pysecrets
-import string
 from collections import Counter
 
 import pandas as pd
 import streamlit as st
-from openai import OpenAI
-import streamlit.components.v1 as components
 from docx import Document
 from docx.shared import RGBColor
 from supabase import create_client
 from metrics import compare_postedit_with_raw_mt, build_research_metrics_payload
 from modules.auth import require_teacher_access
 from modules.task_mode import (
-    ADAPTIVE_TRANSLATION,
     POST_EDITING,
     POST_EDITING_ONLY_METRIC_FIELDS,
     TRANSLATION,
     TASK_OPTIONS,
-    is_adaptive_translation,
     is_translation,
     make_translation_metrics_task_appropriate,
     normalize_task_type,
@@ -34,123 +27,55 @@ from modules.task_mode import (
 
 
 def install_student_paste_guard():
-    """Apply browser-side integrity controls to assessed response boxes.
+    """Block paste and drag/drop into the student translation/post-editing boxes.
 
-    The guard blocks paste/drop and common dictation-style insertion events. On
-    tablets and iPads remain available for normal typing. Phones stay read-only. This remains a deterrent rather
-    than a mathematically foolproof proctoring mechanism: operating-system tools
-    can sometimes make dictated text look like ordinary keyboard input.
+    This is a browser-side deterrent for supervised coursework. It does not make
+    external-tool use impossible, because students control their own browsers.
     """
     st.info(
-        "Academic integrity mode is active: paste, drag/drop, and detected voice "
-        "dictation are blocked. Assessed responses must be completed on a "
-        "desktop, laptop, iPad, or tablet. Phone input remains disabled."
+        "Academic integrity mode is active: pasting or dropping text into the "
+        "translation/post-editing box is disabled. Please type your work directly."
     )
 
     guard_js = r"""
     <script>
     (() => {
-      let rootDoc;
-      let rootWin;
-      try {
-        rootDoc = window.parent.document;
-        rootWin = window.parent;
-      } catch (e) {
-        rootDoc = document;
-        rootWin = window;
-      }
-
       const protectedLabels = new Set(["Translation box", "Post-editing box"]);
-      const ua = (rootWin.navigator && rootWin.navigator.userAgent) || "";
-      const isIPad = /iPad/i.test(ua) || (/Macintosh/i.test(ua) && rootWin.navigator && rootWin.navigator.maxTouchPoints > 1);
-      const isAndroidTablet = /Android/i.test(ua) && !/Mobile/i.test(ua);
-      const isTablet = isIPad || isAndroidTablet || /Tablet/i.test(ua);
-      const isPhone = !isTablet && /Android.*Mobile|iPhone|iPod|webOS|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
 
       const isProtected = (el) =>
         el && el.tagName === "TEXTAREA" && protectedLabels.has(el.getAttribute("aria-label"));
 
-      const addMessage = (el, text, kind) => {
-        const host = el.closest('[data-testid="stTextArea"]') || el.parentElement;
-        if (!host) return;
-        const cls = "eduapp-integrity-" + kind;
-        if (host.querySelector("." + cls)) return;
-        const msg = rootDoc.createElement("div");
-        msg.className = cls;
-        msg.textContent = text;
-        msg.style.fontSize = "0.9rem";
-        msg.style.fontWeight = "600";
-        msg.style.marginTop = "0.35rem";
-        msg.style.padding = "0.45rem 0.6rem";
-        msg.style.borderRadius = "0.35rem";
-        msg.style.background = "rgba(255, 193, 7, 0.14)";
-        msg.style.border = "1px solid rgba(255, 193, 7, 0.45)";
-        host.appendChild(msg);
-      };
-
-      const flashBlocked = (el, reason) => {
+      const showBlockedNotice = (el) => {
         const oldTitle = el.getAttribute("title") || "";
-        el.setAttribute("title", reason);
+        el.setAttribute("title", "Pasting is disabled for this assessed task. Type your work directly.");
         el.style.outline = "2px solid var(--st-primary-color, #ff4b4b)";
-        addMessage(el, reason, "blocked");
-        rootWin.setTimeout(() => {
+        window.setTimeout(() => {
           el.style.outline = "";
           if (oldTitle) el.setAttribute("title", oldTitle);
           else el.removeAttribute("title");
-        }, 1600);
+        }, 1400);
       };
 
-      const block = (event, reason) => {
+      const block = (event) => {
         event.preventDefault();
         event.stopPropagation();
         if (event.stopImmediatePropagation) event.stopImmediatePropagation();
-        flashBlocked(event.currentTarget || event.target, reason);
+        showBlockedNotice(event.currentTarget);
         return false;
       };
 
       const protect = (el) => {
-        if (!isProtected(el) || el.dataset.eduappIntegrityGuard === "1") return;
-        el.dataset.eduappIntegrityGuard = "1";
+        if (!isProtected(el) || el.dataset.eduappPasteGuard === "1") return;
+        el.dataset.eduappPasteGuard = "1";
         el.setAttribute("autocomplete", "off");
         el.setAttribute("autocapitalize", "off");
-        el.setAttribute("spellcheck", "false");
 
-        // Strongest practical protection against phone-keyboard dictation:
-        // assessed response entry is disabled on phones/tablets.
-        if (isPhone) {
-          el.readOnly = true;
-          el.setAttribute("inputmode", "none");
-          el.setAttribute("placeholder", "Use a desktop, laptop, iPad, or tablet for this assessed task.");
-          addMessage(
-            el,
-            "Phone input is disabled for this assessed task. Please use a desktop, laptop, iPad, or tablet.",
-            "mobile"
-          );
-        }
-
-        el.addEventListener("paste", (event) =>
-          block(event, "Pasting is disabled. Type the response directly."), true);
-        el.addEventListener("drop", (event) =>
-          block(event, "Dropping external text is disabled."), true);
+        el.addEventListener("paste", block, true);
+        el.addEventListener("drop", block, true);
 
         el.addEventListener("beforeinput", (event) => {
-          const t = event.inputType || "";
-          if (t === "insertFromPaste" || t === "insertFromDrop") {
-            block(event, "Pasting or dropping external text is disabled.");
-            return;
-          }
-          if (t === "insertFromDictation") {
-            block(event, "Voice dictation is disabled for this assessed task.");
-            return;
-          }
-
-          // Many mobile/OS dictation systems expose a whole phrase as one trusted
-          // insertText/replacement event. Block unusually large single-event inserts
-          // while leaving normal typing and IME composition alone.
-          const data = typeof event.data === "string" ? event.data : "";
-          const largeChunk = !event.isComposing && data.length >= 8;
-          if ((t === "insertText" || t === "insertReplacementText") && largeChunk) {
-            block(event, "Large one-step text insertion/voice dictation is disabled. Type normally.");
+          if (event.inputType === "insertFromPaste" || event.inputType === "insertFromDrop") {
+            block(event);
           }
         }, true);
 
@@ -158,98 +83,30 @@ def install_student_paste_guard():
           const key = (event.key || "").toLowerCase();
           const pasteShortcut = (event.ctrlKey || event.metaKey) && key === "v";
           const shiftInsert = event.shiftKey && event.key === "Insert";
-          if (pasteShortcut || shiftInsert) {
-            block(event, "Pasting is disabled. Type the response directly.");
-          }
+          if (pasteShortcut || shiftInsert) block(event);
         }, true);
       };
 
-      const scan = () => rootDoc.querySelectorAll("textarea").forEach(protect);
+      const scan = () => document.querySelectorAll("textarea").forEach(protect);
       scan();
 
-      if (!rootWin.__eduappIntegrityGuardObserver) {
-        const observer = new rootWin.MutationObserver(scan);
-        observer.observe(rootDoc.documentElement, { childList: true, subtree: true });
-        rootWin.__eduappIntegrityGuardObserver = observer;
+      if (!window.__eduappPasteGuardObserver) {
+        const observer = new MutationObserver(scan);
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        window.__eduappPasteGuardObserver = observer;
       }
     })();
     </script>
     """
 
-    # components.html executes JavaScript in a small iframe; the script then
-    # targets the parent Streamlit document. Height zero keeps it invisible.
-    components.html(guard_js, height=0, width=0)
-
-
-
-def get_adaptive_translation_help(source_text, student_draft, help_type, student_question=''):
-    """Return on-demand AI assistance for the adaptive-translation condition.
-
-    The assistant supports the student's decision-making without writing directly
-    into the assessed response box. The final wording remains the student's work.
-    """
-    api_key = safe_text(st.secrets.get("OPENAI_API_KEY", ""))
-    if not api_key:
-        return None, "OPENAI_API_KEY is not configured in Streamlit Secrets."
-
-    model_name = safe_text(st.secrets.get("OPENAI_MODEL", "gpt-5-mini")) or "gpt-5-mini"
-    client = OpenAI(api_key=api_key)
-
-    help_instructions = {
-        "Terminology help": (
-            "Identify difficult or domain-specific terms in the source and give concise target-language "
-            "translation options with brief usage notes. Do not rewrite the entire translation."
-        ),
-        "Meaning / ambiguity help": (
-            "Explain ambiguous, idiomatic, or structurally difficult parts of the source. Offer alternative "
-            "interpretations where appropriate. Do not produce a complete translation."
-        ),
-        "Review my current draft": (
-            "Review the student's current translation for meaning, omissions, terminology, grammar, fluency, "
-            "and style. Point out specific issues and suggest local revisions rather than replacing the whole text."
-        ),
-        "Suggest the next segment": (
-            "Based on the source and the student's current draft, suggest how to translate only the next short "
-            "untranslated segment. Explain the choice briefly. Do not provide the full remaining translation."
-        ),
-    }
-
-    instruction = help_instructions.get(help_type, help_instructions["Terminology help"])
-    question = safe_text(student_question)
-    prompt = f"""
-You are an adaptive translation assistant inside a university translation-learning application.
-The student is deliberately in an AI-assisted translation condition.
-
-SOURCE TEXT:
-{safe_text(source_text)}
-
-STUDENT'S CURRENT DRAFT:
-{safe_text(student_draft) or '[No draft yet]'}
-
-TYPE OF HELP REQUESTED:
-{help_type}
-
-STUDENT QUESTION (if any):
-{question or '[None]'}
-
-TASK:
-{instruction}
-
-Keep the response concise, pedagogical, and directly useful. Distinguish clearly between explanations and suggested wording.
-"""
-
-    try:
-        response = client.responses.create(
-            model=model_name,
-            input=prompt,
-            max_output_tokens=700,
+    if hasattr(st, "html"):
+        st.html(guard_js, unsafe_allow_javascript=True)
+    else:
+        st.warning(
+            "Your Streamlit version is too old for the browser-side paste guard. "
+            "Upgrade Streamlit to a recent version."
         )
-        text = safe_text(getattr(response, "output_text", ""))
-        if not text:
-            return None, "The AI service returned no text."
-        return text, None
-    except Exception as error:
-        return None, f"AI assistance could not be generated: {error}"
+
 
 # ============================================================
 # Supabase connection
@@ -306,150 +163,6 @@ def save_assignment(assignment):
         st.write("Supabase error:")
         st.code(str(error))
         st.stop()
-
-
-def update_assignment(assignment_id, updates):
-    try:
-        return (
-            get_supabase_client().table("assignments")
-            .update(updates)
-            .eq("assignment_id", safe_text(assignment_id))
-            .execute()
-        )
-    except Exception as error:
-        st.error("Could not update the assignment in Supabase.")
-        st.code(str(error))
-        return None
-
-
-def delete_assignment(assignment_id):
-    """Delete an assignment while preserving already-submitted research records."""
-    try:
-        # Drafts are unfinished work tied to the exercise and should disappear with it.
-        try:
-            get_supabase_client().table("student_drafts").delete().eq(
-                "assignment_id", safe_text(assignment_id)
-            ).execute()
-        except Exception:
-            pass
-
-        return (
-            get_supabase_client().table("assignments")
-            .delete()
-            .eq("assignment_id", safe_text(assignment_id))
-            .execute()
-        )
-    except Exception as error:
-        st.error("Could not delete the assignment from Supabase.")
-        st.code(str(error))
-        return None
-
-
-def parse_audience_rules(value):
-    """Return normalized [{group, code}] audience rules from JSON/list values."""
-    if value is None or value == "":
-        return []
-    data = value
-    if isinstance(value, str):
-        try:
-            data = json.loads(value)
-        except Exception:
-            return []
-    if not isinstance(data, list):
-        return []
-    rules = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        group = safe_text(item.get("group"))
-        code = normalize_access_code(item.get("code"))
-        if group and code:
-            rules.append({"group": group, "code": code})
-    return rules
-
-
-
-
-
-def normalize_access_code(value):
-    """Normalize access codes as text so numeric codes like 123 stay '123'."""
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except Exception:
-        pass
-    if isinstance(value, float) and value.is_integer():
-        value = int(value)
-    return str(value).strip().upper().replace(" ", "")
-
-
-def generate_access_code(length=6):
-    """Generate a short classroom access code that avoids ambiguous characters."""
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "".join(pysecrets.choice(alphabet) for _ in range(length))
-
-
-def audience_rules_from_editor(editor_value):
-    """Normalize the class/group table into [{group, code}] rules.
-
-    Blank access codes are generated automatically. Completely blank rows are ignored.
-    """
-    if editor_value is None:
-        return [], []
-    try:
-        df = pd.DataFrame(editor_value).copy()
-    except Exception:
-        return [], ["Could not read the class/group table."]
-
-    if df.empty:
-        return [], []
-
-    # Accept both current UI column labels and any older internal names.
-    rename_map = {}
-    for col in df.columns:
-        key = safe_text(col).strip().casefold()
-        if key in {"class / group", "class/group", "group", "class", "group name"}:
-            rename_map[col] = "group"
-        elif key in {"access code", "code"}:
-            rename_map[col] = "code"
-    df = df.rename(columns=rename_map)
-    if "group" not in df.columns:
-        df["group"] = ""
-    if "code" not in df.columns:
-        df["code"] = ""
-
-    rules = []
-    errors = []
-    seen_groups = set()
-    seen_codes = set()
-
-    for row_no, row in enumerate(df.to_dict("records"), start=1):
-        group = safe_text(row.get("group")).strip()
-        code = normalize_access_code(row.get("code"))
-        if not group and not code:
-            continue
-        if not group:
-            errors.append(f"Row {row_no}: enter a class/group name, or delete the row.")
-            continue
-        if not code:
-            code = generate_access_code()
-
-        group_key = group.casefold()
-        code_key = code.casefold()
-        if group_key in seen_groups:
-            errors.append(f"Row {row_no}: class/group '{group}' is duplicated.")
-            continue
-        if code_key in seen_codes:
-            errors.append(f"Row {row_no}: access code '{code}' is duplicated.")
-            continue
-
-        seen_groups.add(group_key)
-        seen_codes.add(code_key)
-        rules.append({"group": group, "code": code})
-
-    return rules, errors
 
 
 def load_submissions():
@@ -526,81 +239,6 @@ def save_submission(submission):
 
         st.stop()
 
-
-
-def load_student_draft(assignment_id, task_type, student_id):
-    """Return the most recent saved draft for one student/task, if present."""
-    sid = safe_text(student_id)
-    if not sid:
-        return None
-    try:
-        response = (
-            get_supabase_client().table("student_drafts")
-            .select("*")
-            .eq("assignment_id", safe_text(assignment_id))
-            .eq("task_type", normalize_task_type(task_type))
-            .eq("student_id", sid)
-            .order("updated_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        rows = response.data or []
-        return rows[0] if rows else None
-    except Exception as error:
-        st.error("Could not load the saved draft from Supabase.")
-        if "student_drafts" in str(error).lower():
-            st.warning(
-                "Run the student_drafts migration in the Supabase SQL Editor once, then try again."
-            )
-        st.code(str(error))
-        return None
-
-
-def save_student_draft(draft):
-    """Save or replace one student's draft without creating a final submission."""
-    clean_draft = {
-        key: clean_value_for_supabase(value)
-        for key, value in draft.items()
-    }
-    client = get_supabase_client()
-    try:
-        # Delete+insert avoids depending on a particular supabase-py upsert signature.
-        (
-            client.table("student_drafts")
-            .delete()
-            .eq("assignment_id", clean_draft["assignment_id"])
-            .eq("task_type", clean_draft["task_type"])
-            .eq("student_id", clean_draft["student_id"])
-            .execute()
-        )
-        return client.table("student_drafts").insert(clean_draft).execute()
-    except Exception as error:
-        st.error("Could not save the draft to Supabase.")
-        if "student_drafts" in str(error).lower():
-            st.warning(
-                "Run the student_drafts migration in the Supabase SQL Editor once, then try again."
-            )
-        st.code(str(error))
-        return None
-
-
-def delete_student_draft(assignment_id, task_type, student_id):
-    """Remove a draft after the final submission has been stored successfully."""
-    sid = safe_text(student_id)
-    if not sid:
-        return
-    try:
-        (
-            get_supabase_client().table("student_drafts")
-            .delete()
-            .eq("assignment_id", safe_text(assignment_id))
-            .eq("task_type", normalize_task_type(task_type))
-            .eq("student_id", sid)
-            .execute()
-        )
-    except Exception:
-        # A stale draft is not serious enough to invalidate a successful submission.
-        pass
 
 def update_submission_review(submission_id, teacher_score, teacher_feedback):
     return (
@@ -1213,62 +851,18 @@ def teacher_assignment_page():
         return
 
     st.divider()
-    st.subheader("Lecturer Identity")
-    st.caption(
-        "Assignments store the creator's identity so colleagues can see who created each exercise."
-    )
-    ident_col1, ident_col2 = st.columns(2)
-    with ident_col1:
-        creator_name = st.text_input(
-            "Lecturer / creator name",
-            value=st.session_state.get("eduapp_creator_name", ""),
-            placeholder="Example: Dr Nour Abdelaal",
-        )
-    with ident_col2:
-        creator_email = st.text_input(
-            "Lecturer email or staff ID",
-            value=st.session_state.get("eduapp_creator_email", ""),
-            placeholder="Example: nour@university.edu",
-        )
-    st.session_state["eduapp_creator_name"] = creator_name.strip()
-    st.session_state["eduapp_creator_email"] = creator_email.strip()
 
-    st.divider()
     st.subheader("Create a New Assignment")
 
     with st.form("create_assignment_form"):
         course = st.text_input(
             "Course name",
-            placeholder="Example: TRS430",
+            placeholder="Example: Translation Studies",
         )
 
         title = st.text_input(
             "Assignment title",
             placeholder="Example: Post-editing Task 1",
-        )
-
-        st.markdown("**Assigned classes / groups**")
-        st.caption(
-            "Add one row for each class or group. You may type your own access code or leave "
-            "the code blank and EduApp will generate one automatically. Leave the whole table "
-            "blank only if the exercise should be visible to all students."
-        )
-        audience_editor = st.data_editor(
-            pd.DataFrame(columns=["Class / group", "Access code"]),
-            num_rows="dynamic",
-            hide_index=True,
-            use_container_width=True,
-            key="create_assignment_audience_editor",
-            column_config={
-                "Class / group": st.column_config.TextColumn(
-                    "Class / group",
-                    help="Example: TRS430-A",
-                ),
-                "Access code": st.column_config.TextColumn(
-                    "Access code",
-                    help="Optional. Leave blank to generate a code automatically.",
-                ),
-            },
         )
 
         instructions = st.text_area(
@@ -1309,24 +903,17 @@ def teacher_assignment_page():
         )
 
         active = st.checkbox(
-            "Make this assignment visible to eligible students",
+            "Make this assignment visible to students",
             value=True,
         )
 
         submitted = st.form_submit_button("Create Assignment")
 
         if submitted:
-            audience_rules, audience_errors = audience_rules_from_editor(audience_editor)
-            if not creator_name.strip():
-                st.error("Please enter the lecturer / creator name above.")
-            elif not title.strip():
+            if not title.strip():
                 st.error("Please enter an assignment title.")
             elif not source_text.strip():
                 st.error("Please enter the source text.")
-            elif audience_errors:
-                st.error("Please check the class/group table:")
-                for error in audience_errors:
-                    st.write(f"- {error}")
             else:
                 assignment = {
                     "course": course.strip(),
@@ -1338,236 +925,50 @@ def teacher_assignment_page():
                     "due_date": str(due_date),
                     "max_score": float(max_score),
                     "active": bool(active),
-                    "created_by_name": creator_name.strip(),
-                    "created_by_email": creator_email.strip(),
-                    "audience_rules": audience_rules,
                 }
 
                 save_assignment(assignment)
-                st.session_state["last_created_assignment_codes"] = {
-                    "title": title.strip(),
-                    "rules": audience_rules,
-                }
                 st.success("Assignment created successfully.")
                 st.rerun()
 
-    last_created = st.session_state.pop("last_created_assignment_codes", None)
-    if last_created:
-        st.success(f"Created: {last_created.get('title', 'Assignment')}")
-        rules = last_created.get("rules") or []
-        if rules:
-            st.markdown("### Codes to give your students")
-            st.caption("Give each class only its own code.")
-            st.dataframe(
-                pd.DataFrame(
-                    [{"Class / group": r.get("group", ""), "Access code": r.get("code", "")} for r in rules]
-                ),
-                hide_index=True,
-                use_container_width=True,
-            )
-        else:
-            st.info("This assignment is visible to all students; no access code is required.")
-
     st.divider()
+
     st.subheader("Existing Assignments")
 
     assignments = load_assignments()
 
     if assignments.empty:
         st.info("No assignments created yet.")
-        return
-
-    assignments = assignments.copy()
-    if "machine_translation" in assignments.columns:
-        assignments["student_modes"] = assignments["machine_translation"].apply(
-            lambda value: "Translation or post-editing" if safe_text(value) else "Translation only"
-        )
-
-    if "audience_rules" in assignments.columns:
-        assignments["assigned_groups"] = assignments["audience_rules"].apply(
-            lambda value: ", ".join(rule["group"] for rule in parse_audience_rules(value))
-            or "All students"
-        )
     else:
-        assignments["assigned_groups"] = "All students"
+        if "machine_translation" in assignments.columns:
+            assignments = assignments.copy()
+            assignments["student_modes"] = assignments["machine_translation"].apply(
+                lambda value: (
+                    "Translation or post-editing"
+                    if safe_text(value)
+                    else "Translation only"
+                )
+            )
 
-    display_columns = [
-        "created_at",
-        "created_by_name",
-        "created_by_email",
-        "course",
-        "title",
-        "assigned_groups",
-        "student_modes",
-        "due_date",
-        "max_score",
-        "active",
-    ]
-    available_columns = [column for column in display_columns if column in assignments.columns]
-    st.dataframe(assignments[available_columns], use_container_width=True, hide_index=True)
+        display_columns = [
+            "created_at",
+            "course",
+            "title",
+            "student_modes",
+            "due_date",
+            "max_score",
+            "active",
+        ]
 
-    st.markdown("### View Access Codes and Edit an Assignment")
-    st.caption(
-        "Select an exercise to see the exact class/group codes you can give students, "
-        "or update the exercise after creation."
-    )
+        available_columns = [
+            column for column in display_columns if column in assignments.columns
+        ]
 
-    edit_labels = {}
-    for _, row in assignments.iterrows():
-        assignment_id = safe_text(row.get("assignment_id"))
-        edit_label = (
-            f"{safe_text(row.get('title')) or 'Untitled'} — "
-            f"{safe_text(row.get('course')) or 'No course'} — "
-            f"created by {safe_text(row.get('created_by_name')) or 'Legacy/unknown'} — "
-            f"ID {assignment_id}"
+        st.dataframe(
+            assignments[available_columns],
+            use_container_width=True,
+            hide_index=True,
         )
-        edit_labels[edit_label] = assignment_id
-
-    selected_edit_label = st.selectbox(
-        "Choose assignment to view or edit",
-        list(edit_labels.keys()),
-        key="edit_assignment_choice",
-    )
-    selected_assignment_id = edit_labels[selected_edit_label]
-    selected_row = assignments[
-        assignments["assignment_id"].astype(str) == str(selected_assignment_id)
-    ].iloc[0]
-
-    selected_rules = parse_audience_rules(selected_row.get("audience_rules"))
-    if selected_rules:
-        st.markdown("#### Student access codes")
-        for rule in selected_rules:
-            st.code(f"{safe_text(rule.get('group'))} | {safe_text(rule.get('code'))}")
-        st.info("Give each class only its own access code. Students use that code on the Student Assignments page.")
-    else:
-        st.info("This assignment is currently visible to all students and does not require an access code.")
-
-    with st.expander("Edit selected assignment", expanded=False):
-        current_rules_text = "\n".join(
-            f"{safe_text(rule.get('group'))} | {safe_text(rule.get('code'))}"
-            for rule in selected_rules
-        )
-        current_due = pd.to_datetime(selected_row.get("due_date"), errors="coerce")
-        if pd.isna(current_due):
-            current_due = pd.Timestamp.today()
-
-        with st.form("edit_assignment_form"):
-            edit_course = st.text_input("Course name", value=safe_text(selected_row.get("course")))
-            edit_title = st.text_input("Assignment title", value=safe_text(selected_row.get("title")))
-            st.markdown("**Assigned classes / groups**")
-            st.caption(
-                "Edit the table directly. Add or delete rows as needed. If you leave an access "
-                "code blank, EduApp will generate a new one when you save."
-            )
-            edit_audience_editor = st.data_editor(
-                pd.DataFrame(
-                    [
-                        {"Class / group": rule.get("group", ""), "Access code": rule.get("code", "")}
-                        for rule in selected_rules
-                    ],
-                    columns=["Class / group", "Access code"],
-                ),
-                num_rows="dynamic",
-                hide_index=True,
-                use_container_width=True,
-                key=f"edit_assignment_audience_editor_{selected_assignment_id}",
-                column_config={
-                    "Class / group": st.column_config.TextColumn("Class / group"),
-                    "Access code": st.column_config.TextColumn(
-                        "Access code",
-                        help="Leave blank to generate a new access code automatically.",
-                    ),
-                },
-            )
-            edit_instructions = st.text_area(
-                "Instructions for students", value=safe_text(selected_row.get("instructions")), height=120
-            )
-            edit_source = st.text_area(
-                "Source text", value=safe_text(selected_row.get("source_text")), height=180
-            )
-            edit_mt = st.text_area(
-                "Raw machine translation", value=safe_text(selected_row.get("machine_translation")), height=180
-            )
-            edit_reference = st.text_area(
-                "Reference translation / model answer",
-                value=safe_text(selected_row.get("reference_translation")),
-                height=180,
-            )
-            edit_due = st.date_input("Due date", value=current_due.date())
-            edit_max_score = st.number_input(
-                "Maximum score",
-                min_value=1.0,
-                max_value=100.0,
-                value=float(selected_row.get("max_score") or 10.0),
-                step=0.5,
-            )
-            edit_active = st.checkbox(
-                "Make this assignment visible to eligible students",
-                value=str(selected_row.get("active")).strip().lower() in {"true", "1", "yes"},
-            )
-            save_changes = st.form_submit_button("Save Changes")
-
-            if save_changes:
-                edited_rules, edited_errors = audience_rules_from_editor(edit_audience_editor)
-                if not edit_title.strip():
-                    st.error("Please enter an assignment title.")
-                elif not edit_source.strip():
-                    st.error("Please enter the source text.")
-                elif edited_errors:
-                    st.error("Please check the class/group table:")
-                    for error in edited_errors:
-                        st.write(f"- {error}")
-                else:
-                    updates = {
-                        "course": edit_course.strip(),
-                        "title": edit_title.strip(),
-                        "instructions": edit_instructions.strip(),
-                        "source_text": edit_source.strip(),
-                        "machine_translation": edit_mt.strip(),
-                        "reference_translation": edit_reference.strip(),
-                        "due_date": str(edit_due),
-                        "max_score": float(edit_max_score),
-                        "active": bool(edit_active),
-                        "audience_rules": edited_rules,
-                    }
-                    result = update_assignment(selected_assignment_id, updates)
-                    if result is not None:
-                        st.success("Assignment updated successfully.")
-                        st.rerun()
-
-    st.markdown("### Delete an Assignment")
-    st.warning(
-        "Deleting removes the exercise from the assignment list and deletes unfinished drafts. "
-        "Already-submitted student records are preserved for grading and research."
-    )
-    labels = {}
-    for _, row in assignments.iterrows():
-        assignment_id = safe_text(row.get("assignment_id"))
-        label = (
-            f"{safe_text(row.get('title')) or 'Untitled'} — "
-            f"{safe_text(row.get('course')) or 'No course'} — "
-            f"created by {safe_text(row.get('created_by_name')) or 'Legacy/unknown'} — "
-            f"ID {assignment_id}"
-        )
-        labels[label] = assignment_id
-
-    selected_delete_label = st.selectbox(
-        "Choose assignment to delete",
-        list(labels.keys()),
-        key="delete_assignment_choice",
-    )
-    confirm_delete = st.checkbox(
-        "I understand that this removes the exercise from student access.",
-        key="delete_assignment_confirm",
-    )
-    if st.button("Delete selected assignment", type="primary"):
-        if not confirm_delete:
-            st.error("Tick the confirmation box before deleting.")
-        else:
-            result = delete_assignment(labels[selected_delete_label])
-            if result is not None:
-                st.success("Assignment deleted. Existing submissions were preserved.")
-                st.rerun()
 
 
 # ============================================================
@@ -1596,42 +997,10 @@ def student_assignment_page():
         .str.lower()
         .isin({"true", "1", "yes"})
     )
-    active_assignments = assignments[active_mask].copy()
+    active_assignments = assignments[active_mask]
 
     if active_assignments.empty:
         st.info("No active assignments are currently available.")
-        return
-
-    st.markdown("### Class / Group Access")
-    student_access_code = st.text_input(
-        "Class or group access code",
-        type="password",
-        placeholder="Enter the code provided by your lecturer",
-        help="Only assignments assigned to your class/group will be shown.",
-        key="student_assignment_access_code",
-    ).strip()
-
-    def _student_can_access(row):
-        rules = parse_audience_rules(row.get("audience_rules")) if "audience_rules" in row.index else []
-        if not rules:
-            # Backward compatibility: assignments created before group controls remain public.
-            return True
-        if not student_access_code:
-            return False
-        return any(
-            normalize_access_code(rule.get("code")).casefold() == normalize_access_code(student_access_code).casefold()
-            for rule in rules
-        )
-
-    active_assignments = active_assignments[
-        active_assignments.apply(_student_can_access, axis=1)
-    ]
-
-    if active_assignments.empty:
-        if student_access_code:
-            st.warning("No active assignments are assigned to this class/group access code.")
-        else:
-            st.info("Enter your class/group access code to view assigned exercises.")
         return
 
     label_to_id = {}
@@ -1662,17 +1031,6 @@ def student_assignment_page():
 
     st.write(f"**Due date:** {safe_text(selected_assignment.get('due_date')) or 'Not set'}")
     st.write(f"**Maximum score:** {selected_assignment.get('max_score')}")
-    selected_rules = parse_audience_rules(selected_assignment.get("audience_rules"))
-    matched_group = next(
-        (
-            rule.get("group")
-            for rule in selected_rules
-            if normalize_access_code(rule.get("code")).casefold() == normalize_access_code(student_access_code).casefold()
-        ),
-        "",
-    )
-    if matched_group:
-        st.write(f"**Class / group:** {matched_group}")
 
     if safe_text(selected_assignment.get("instructions")):
         st.markdown("### Instructions")
@@ -1681,6 +1039,15 @@ def student_assignment_page():
     source_text = safe_text(selected_assignment.get("source_text"))
     raw_mt = safe_text(selected_assignment.get("machine_translation"))
     reference_translation = safe_text(selected_assignment.get("reference_translation"))
+
+    st.markdown("### Source Text")
+    st.text_area(
+        "Source text",
+        source_text,
+        height=180,
+        disabled=True,
+        label_visibility="collapsed",
+    )
 
     st.markdown("### Student Information")
     student_col1, student_col2 = st.columns(2)
@@ -1701,12 +1068,9 @@ def student_assignment_page():
 
     available_task_labels = list(TASK_OPTIONS)
     if not raw_mt:
-        available_task_labels = [
-            "Translate without AI",
-            "Adaptive translation with AI",
-        ]
+        available_task_labels = ["Translate from the source text"]
         st.info(
-            "This assignment has no machine translation, so students can choose unaided translation or adaptive AI-assisted translation."
+            "This assignment has no machine translation, so Translation is the only available mode."
         )
 
     selected_task_label = st.radio(
@@ -1718,131 +1082,46 @@ def student_assignment_page():
     task_type = TASK_OPTIONS[selected_task_label]
     st.info(task_instruction(task_type))
 
-    if is_adaptive_translation(task_type):
-        answer_key = f"student_adaptive_translation_{selected_assignment_id}"
-    elif is_translation(task_type):
+    if is_translation(task_type):
         answer_key = f"student_translation_{selected_assignment_id}"
-    else:
-        answer_key = f"student_post_edit_{selected_assignment_id}"
-    default_answer = "" if is_translation(task_type) else raw_mt
-    if answer_key not in st.session_state:
-        st.session_state[answer_key] = default_answer
+        if answer_key not in st.session_state:
+            st.session_state[answer_key] = ""
 
-    st.markdown("### Continue a Saved Draft")
-    st.caption(
-        "Drafts are stored in Supabase and are separate for Translation and Post-editing. "
-        "Enter the same Student ID when you return."
-    )
-    if st.button(
-        "Load / resume saved draft",
-        key=f"load_draft_{selected_assignment_id}_{task_type}",
-    ):
-        if not student_id.strip():
-            st.error("Enter your Student ID first so the app can find your draft.")
-        else:
-            draft = load_student_draft(selected_assignment_id, task_type, student_id)
-            if draft:
-                st.session_state[answer_key] = safe_text(draft.get("draft_text"))
-                st.session_state[f"draft_loaded_notice_{selected_assignment_id}_{task_type}"] = True
-                st.rerun()
-            else:
-                st.info("No saved draft was found for this Student ID and task type.")
-
-    if st.session_state.pop(
-        f"draft_loaded_notice_{selected_assignment_id}_{task_type}", False
-    ):
-        st.success("Saved draft loaded. You can continue from where you stopped.")
-
-    # Keep the source and the student's working box together so students can compare
-    # them without scrolling up and down.
-    source_col, work_col = st.columns(2, gap="medium")
-    with source_col:
-        st.markdown("### Source Text")
-        st.text_area(
-            "Source text",
-            source_text,
-            height=360,
-            disabled=True,
+        st.markdown("### Your Translation")
+        student_answer = st.text_area(
+            "Translation box",
+            key=answer_key,
+            height=300,
+            placeholder="Write your translation here.",
             label_visibility="collapsed",
         )
-
-    if is_translation(task_type):
-        with work_col:
-            st.markdown("### Your Translation")
-            student_answer = st.text_area(
-                "Translation box",
-                key=answer_key,
-                height=360,
-                placeholder="Write your translation here.",
-                label_visibility="collapsed",
-            )
         edit_summary = {
             "inserted_words": None,
             "deleted_words": None,
             "replaced_segments": None,
             "unchanged_words": None,
         }
-
-        if is_adaptive_translation(task_type):
-            st.markdown("### Adaptive AI Assistant")
-            st.caption(
-                "AI assistance is intentionally available in this condition. The assistant gives on-demand "
-                "guidance, while the final translation remains in your own response box."
-            )
-            ai_help_type = st.selectbox(
-                "What kind of help do you want?",
-                [
-                    "Terminology help",
-                    "Meaning / ambiguity help",
-                    "Review my current draft",
-                    "Suggest the next segment",
-                ],
-                key=f"adaptive_help_type_{selected_assignment_id}",
-            )
-            ai_question = st.text_input(
-                "Optional question for the AI assistant",
-                placeholder="Example: What does this phrase mean in context?",
-                key=f"adaptive_question_{selected_assignment_id}",
-            )
-            if st.button(
-                "Ask the adaptive AI assistant",
-                key=f"adaptive_ai_button_{selected_assignment_id}",
-            ):
-                with st.spinner("Generating adaptive translation support..."):
-                    ai_text, ai_error = get_adaptive_translation_help(
-                        source_text, student_answer, ai_help_type, ai_question
-                    )
-                if ai_error:
-                    st.error(ai_error)
-                else:
-                    st.session_state[f"adaptive_ai_response_{selected_assignment_id}"] = ai_text
-
-            adaptive_response = st.session_state.get(
-                f"adaptive_ai_response_{selected_assignment_id}", ""
-            )
-            if adaptive_response:
-                st.markdown("**AI guidance**")
-                st.info(adaptive_response)
-                st.caption(
-                    "Use the guidance critically. Type any revisions yourself in the assessed translation box."
-                )
     else:
-        with work_col:
-            st.markdown("### Post-edit the MT Output")
-            st.caption("Raw MT is shown below for reference while you post-edit.")
-            st.text_area(
-                "Original raw MT output",
-                raw_mt,
-                height=150,
-                disabled=True,
-                label_visibility="collapsed",
-            )
-            student_answer = st.text_area(
-                "Post-editing box",
-                key=answer_key,
-                height=170,
-                label_visibility="collapsed",
-            )
+        st.markdown("### Raw Machine Translation")
+        st.text_area(
+            "Original raw MT output",
+            raw_mt,
+            height=180,
+            disabled=True,
+            label_visibility="collapsed",
+        )
+
+        answer_key = f"student_post_edit_{selected_assignment_id}"
+        if answer_key not in st.session_state:
+            st.session_state[answer_key] = raw_mt
+
+        st.markdown("### Post-edit the MT Output")
+        student_answer = st.text_area(
+            "Post-editing box",
+            key=answer_key,
+            height=300,
+            label_visibility="collapsed",
+        )
 
         st.markdown("### Track Changes Preview")
         track_changes_html = make_track_changes_html(raw_mt, student_answer)
@@ -1865,37 +1144,6 @@ def student_assignment_page():
             use_container_width=True,
             hide_index=True,
         )
-
-    save_col, note_col = st.columns([1, 2])
-    with save_col:
-        save_draft_clicked = st.button(
-            "Save draft for later",
-            key=f"save_draft_{selected_assignment_id}_{task_type}",
-            use_container_width=True,
-        )
-    with note_col:
-        st.caption(
-            "Saving a draft does not submit the assignment. You may close the app and return later."
-        )
-
-    if save_draft_clicked:
-        if not student_id.strip():
-            st.error("Enter your Student ID before saving a draft.")
-        else:
-            result = save_student_draft(
-                {
-                    "assignment_id": safe_text(selected_assignment_id),
-                    "task_type": normalize_task_type(task_type),
-                    "student_id": student_id.strip(),
-                    "student_name": student_name.strip(),
-                    "draft_text": student_answer,
-                }
-            )
-            if result is not None:
-                st.success(
-                    "Draft saved. Return to this assignment later, enter the same Student ID, "
-                    "choose the same task type, and click 'Load / resume saved draft'."
-                )
 
     # Apply the browser-side integrity guard only to the assessed student response boxes.
     install_student_paste_guard()
@@ -2055,7 +1303,6 @@ def student_assignment_page():
                 "task_type": normalize_task_type(task_type),
                 "student_id": student_id.strip(),
                 "student_name": student_name.strip(),
-                "group_name": matched_group,
                 "source_text": source_text,
                 # The MT may remain stored for teacher/research comparison, but it is hidden
                 # from students in Translation mode.
@@ -2086,7 +1333,6 @@ def student_assignment_page():
             )
 
             save_submission(submission)
-            delete_student_draft(selected_assignment_id, task_type, student_id)
 
         st.success(f"Your {task_type_label(task_type).lower()} submission has been saved.")
 
