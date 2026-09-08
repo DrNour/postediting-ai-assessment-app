@@ -339,22 +339,31 @@ def cronbach_alpha(df):
 def build_model_matrix(df, feature_columns):
     X = df[feature_columns].copy()
 
+    # Remove duplicate source columns while preserving the first occurrence.
+    X = X.loc[:, ~X.columns.duplicated()]
+
     for col in X.columns:
         if X[col].dtype == "object":
             X[col] = X[col].astype(str)
 
     X = pd.get_dummies(X, drop_first=True, dummy_na=True)
+
+    # Dummy expansion can also occasionally create duplicate names.
+    X = X.loc[:, ~X.columns.duplicated()]
+
     X = X.apply(pd.to_numeric, errors="coerce")
 
     for col in X.columns:
-        median_value = X[col].median()
+        series = X[col]
+
+        median_value = series.median(skipna=True)
+
         if pd.isna(median_value):
-            median_value = 0
-        X[col] = X[col].fillna(median_value)
+            median_value = 0.0
+
+        X[col] = series.fillna(median_value)
 
     return X
-
-
 def make_cv(task_type, y, groups=None, n_splits=5):
     n_samples = len(y)
     n_splits = max(2, min(n_splits, n_samples))
