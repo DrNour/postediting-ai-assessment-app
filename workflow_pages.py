@@ -253,9 +253,16 @@ Keep the response concise, pedagogical, and directly useful. Distinguish clearly
         return text, None
     except Exception as error:
         error_text = safe_text(error)
-        if "429" in error_text or "quota" in error_text.lower() or "resource_exhausted" in error_text.lower():
+        error_lower = error_text.lower()
+        if "429" in error_text or "quota" in error_lower or "resource_exhausted" in error_lower:
             return None, "AI assistance is temporarily unavailable because the Gemini quota has been reached. Please continue translating independently and try again later."
-        return None, "AI assistance is temporarily unavailable. Please continue translating independently or try again later."
+
+        # Temporary lecturer-facing diagnostic: expose only a short, sanitized
+        # error summary so API/auth/model problems can be identified quickly.
+        # Never include the API key or full request payload.
+        diagnostic = error_text.replace(api_key, "[REDACTED]") if api_key else error_text
+        diagnostic = " ".join(diagnostic.split())[:500]
+        return None, f"Gemini diagnostic error: {diagnostic}"
 
 # ============================================================
 # Supabase connection
