@@ -6,6 +6,7 @@ import html
 import math
 import secrets as pysecrets
 import string
+import time
 from collections import Counter
 
 import pandas as pd
@@ -35,15 +36,14 @@ from modules.task_mode import (
 def install_student_paste_guard():
     """Apply browser-side integrity controls to assessed response boxes.
 
-    The guard blocks paste/drop and common dictation-style insertion events. On
-    tablets and iPads remain available for normal typing. Phones stay read-only. This remains a deterrent rather
-    than a mathematically foolproof proctoring mechanism: operating-system tools
-    can sometimes make dictated text look like ordinary keyboard input.
+    The guard blocks paste/drop and explicit dictation-style insertion events while
+    keeping normal typing available on desktops, laptops, iPads, tablets, and phones.
+    This remains a deterrent rather than a mathematically foolproof proctoring mechanism.
     """
     st.info(
         "Academic integrity mode is active: paste, drag/drop, and detected voice "
-        "dictation are blocked. Assessed responses must be completed on a "
-        "desktop, laptop, iPad, or tablet. Phone input remains disabled."
+        "dictation are blocked. Normal typing is available on desktops, laptops, "
+        "iPads, tablets, and phones."
     )
 
     guard_js = r"""
@@ -60,12 +60,6 @@ def install_student_paste_guard():
       }
 
       const protectedLabels = new Set(["Translation box", "Post-editing box"]);
-      const ua = (rootWin.navigator && rootWin.navigator.userAgent) || "";
-      const isIPad = /iPad/i.test(ua) || (/Macintosh/i.test(ua) && rootWin.navigator && rootWin.navigator.maxTouchPoints > 1);
-      const isAndroidTablet = /Android/i.test(ua) && !/Mobile/i.test(ua);
-      const isTablet = isIPad || isAndroidTablet || /Tablet/i.test(ua);
-      const isPhone = !isTablet && /Android.*Mobile|iPhone|iPod|webOS|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
-
       const isProtected = (el) =>
         el && el.tagName === "TEXTAREA" && protectedLabels.has(el.getAttribute("aria-label"));
 
@@ -114,19 +108,6 @@ def install_student_paste_guard():
         el.setAttribute("autocapitalize", "off");
         el.setAttribute("spellcheck", "false");
 
-        // Strongest practical protection against phone-keyboard dictation:
-        // assessed response entry is disabled on phones/tablets.
-        if (isPhone) {
-          el.readOnly = true;
-          el.setAttribute("inputmode", "none");
-          el.setAttribute("placeholder", "Use a desktop, laptop, iPad, or tablet for this assessed task.");
-          addMessage(
-            el,
-            "Phone input is disabled for this assessed task. Please use a desktop, laptop, iPad, or tablet.",
-            "mobile"
-          );
-        }
-
         el.addEventListener("paste", (event) =>
           block(event, "Pasting is disabled. Type the response directly."), true);
         el.addEventListener("drop", (event) =>
@@ -141,15 +122,6 @@ def install_student_paste_guard():
           if (t === "insertFromDictation") {
             block(event, "Voice dictation is disabled for this assessed task.");
             return;
-          }
-
-          // Many mobile/OS dictation systems expose a whole phrase as one trusted
-          // insertText/replacement event. Block unusually large single-event inserts
-          // while leaving normal typing and IME composition alone.
-          const data = typeof event.data === "string" ? event.data : "";
-          const largeChunk = !event.isComposing && data.length >= 8;
-          if ((t === "insertText" || t === "insertReplacementText") && largeChunk) {
-            block(event, "Large one-step text insertion/voice dictation is disabled. Type normally.");
           }
         }, true);
 
@@ -191,7 +163,7 @@ def get_adaptive_translation_help(source_text, student_draft, help_type, student
     if not api_key:
         return None, "Gemini AI is not configured. Ask your lecturer to add GEMINI_API_KEY to Streamlit Secrets."
 
-    model_name = safe_text(st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")) or "gemini-2.5-flash"
+    model_name = safe_text(st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash")) or "gemini-3.6-flash"
     try:
         from google import genai
     except Exception:
@@ -239,30 +211,54 @@ STUDENT QUESTION (if any):
 TASK:
 {instruction}
 
+LANGUAGE RULE:
+This course uses English and Arabic only.
+- If the source text is primarily English, provide translation help in Arabic.
+- If the source text is primarily Arabic, provide translation help in English.
+- Do not provide Spanish or any other target language unless explicitly requested by the lecturer.
+
 Keep the response concise, pedagogical, and directly useful. Distinguish clearly between explanations and suggested wording.
 """
 
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-        )
-        text = safe_text(getattr(response, "text", ""))
-        if not text:
-            return None, "Gemini returned no text. Please try again."
-        return text, None
-    except Exception as error:
-        error_text = safe_text(error)
-        error_lower = error_text.lower()
-        if "429" in error_text or "quota" in error_lower or "resource_exhausted" in error_lower:
-            return None, "AI assistance is temporarily unavailable because the Gemini quota has been reached. Please continue translating independently and try again later."
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            text = safe_text(getattr(response, "text", ""))
+            if text:
+                return text, None
+            if attempt < 2:
+                time.sleep(1 + attempt)
+                continue
+            return None, "The AI assistant did not return a response. Please try again."
+        except Exception as error:
+            error_text = safe_text(error)
+            error_lower = error_text.lower()
 
-        # Temporary lecturer-facing diagnostic: expose only a short, sanitized
-        # error summary so API/auth/model problems can be identified quickly.
-        # Never include the API key or full request payload.
-        diagnostic = error_text.replace(api_key, "[REDACTED]") if api_key else error_text
-        diagnostic = " ".join(diagnostic.split())[:500]
-        return None, f"Gemini diagnostic error: {diagnostic}"
+            is_busy = (
+                "503" in error_text
+                or "unavailable" in error_lower
+                or "high demand" in error_lower
+            )
+            is_quota = (
+                "429" in error_text
+                or "quota" in error_lower
+                or "resource_exhausted" in error_lower
+                or "rate limit" in error_lower
+                or "too many requests" in error_lower
+            )
+
+            if is_busy or is_quota:
+                if attempt < 2:
+                    time.sleep(2 + attempt * 2)
+                    continue
+                if is_quota:
+                    return None, "The AI assistant has reached its current usage limit. Please try again later. Your draft remains saved."
+                return None, "The AI service is busy right now. Please try again in a moment. Your draft remains saved."
+
+            return None, "AI assistance is temporarily unavailable. Please continue translating independently or try again later. Your draft remains saved."
 
 # ============================================================
 # Supabase connection
