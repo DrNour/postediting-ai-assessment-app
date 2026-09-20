@@ -10,7 +10,7 @@ Original analytics-page blob: `dcbca3631961acbc85f2fc123fbfec8876d66cbc`
 
 - `modules/edustatguard.py`: independent `allow` / `warn` / `block` validation engine.
 - `pages/6_Research_Analytics.py`: integration for paired tests, correlations, and categorical tests.
-- `tests/test_edustatguard.py`: 13 unit tests covering identifiers, small samples, repeated participants, deterministic mappings, sparse tables, and p-value display.
+- `tests/test_edustatguard.py`: 16 unit tests covering identifiers, small samples, repeated participants, deterministic mappings, sparse tables, p-value display, and Arabic-direction detection.
 - `docs/edustatguard_policy.md`: versioned rule catalogue for the software paper.
 - `modules/rtl_layout.py` and `app.py`: Arabic-aware RTL, right alignment, and justified paragraph rendering without changing English interface direction.
 
