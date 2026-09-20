@@ -9,6 +9,12 @@ import streamlit as st
 from supabase import create_client
 
 from modules.auth import require_teacher_access
+from modules.edustatguard import (
+    format_p_value,
+    format_p_value_columns,
+    validate_contingency,
+    validate_numeric_pair,
+)
 from modules.task_mode import POST_EDITING, normalize_task_type, task_type_label
 
 try:
@@ -143,6 +149,42 @@ def safe_text(value):
     if value is None:
         return ""
     return str(value).strip()
+
+
+def render_edustatguard(report):
+    """Render a concise, auditable validation decision before test output."""
+    st.markdown("**EduStatGuard validation**")
+
+    if report.decision == "allow":
+        st.success("ALLOW — no current safeguard blocks this analysis request.")
+    elif report.decision == "warn":
+        st.warning("WARN — the analysis may run, but interpret it with the limitations below.")
+    else:
+        st.error("BLOCK — inferential output is suppressed because the request is not statistically defensible.")
+
+    def render_finding(finding):
+        message = (
+            f"**{finding.title} ({finding.rule_id})** — {finding.explanation}\n\n"
+            f"**Suggested repair:** {finding.repair}"
+        )
+        if finding.decision == "block":
+            st.error(message)
+        else:
+            st.warning(message)
+
+    ordered_findings = sorted(
+        report.findings,
+        key=lambda finding: 0 if finding.decision == "block" else 1,
+    )
+    if ordered_findings:
+        render_finding(ordered_findings[0])
+
+    if len(ordered_findings) > 1:
+        with st.expander(f"Show {len(ordered_findings) - 1} additional validation finding(s)"):
+            for finding in ordered_findings[1:]:
+                render_finding(finding)
+
+    st.caption(f"EduStatGuard policy version {report.policy_version}")
 
 
 def to_numeric_series(series):
@@ -1031,7 +1073,20 @@ with tabs[4]:
     paired_df[paired_b] = pd.to_numeric(paired_df[paired_b], errors="coerce")
     paired_df = paired_df.dropna()
 
-    if paired_df.empty or len(paired_df) < 2:
+    paired_guard = validate_numeric_pair(
+        filtered_df,
+        paired_a,
+        paired_b,
+        analysis="paired_test",
+    )
+    render_edustatguard(paired_guard)
+
+    if paired_guard.blocked:
+        st.info(
+            "The paired test was not run. Change the selected variables or filters "
+            "using the repair guidance above."
+        )
+    elif paired_df.empty or len(paired_df) < 2:
         st.warning("At least two complete paired observations are required.")
     else:
         x = paired_df[paired_a]
@@ -1075,10 +1130,11 @@ with tabs[4]:
         )
 
         st.dataframe(
-            paired_results,
+            format_p_value_columns(paired_results),
             use_container_width=True,
             hide_index=True,
         )
+        st.caption("P-values smaller than .001 are displayed as p < .001; a p-value is never reported as zero.")
 
 
 # ============================================================
@@ -1110,7 +1166,23 @@ with tabs[5]:
     corr_df[y_col] = pd.to_numeric(corr_df[y_col], errors="coerce")
     corr_df = corr_df.dropna()
 
-    if len(corr_df) < 3:
+    correlation_guard = validate_numeric_pair(
+        filtered_df,
+        x_col,
+        y_col,
+        analysis="correlation",
+    )
+    render_edustatguard(correlation_guard)
+
+    if correlation_guard.blocked:
+        st.info(
+            "The correlation test was not run. The available points may still be inspected "
+            "descriptively, but they are not presented as inferential evidence."
+        )
+        if not corr_df.empty:
+            st.subheader("Descriptive scatter preview")
+            st.scatter_chart(corr_df, x=x_col, y=y_col)
+    elif len(corr_df) < 3:
         st.warning("At least three complete observations are required.")
     else:
         x = corr_df[x_col]
@@ -1144,10 +1216,11 @@ with tabs[5]:
         )
 
         st.dataframe(
-            corr_results,
+            format_p_value_columns(corr_results),
             use_container_width=True,
             hide_index=True,
         )
+        st.caption("P-values smaller than .001 are displayed as p < .001; a p-value is never reported as zero.")
 
         st.subheader("Scatter data preview")
         st.scatter_chart(
@@ -1187,7 +1260,7 @@ with tabs[5]:
                 {
                     "method": "Permutation test for Spearman correlation",
                     "statistic": permutation_result.statistic,
-                    "p_value": permutation_result.pvalue,
+                    "p_value": format_p_value(permutation_result.pvalue),
                     "n_resamples": n_resamples,
                 }
             )
@@ -1229,7 +1302,15 @@ with tabs[6]:
         st.subheader("Contingency table")
         st.dataframe(contingency_table, use_container_width=True)
 
-        if contingency_table.shape[0] >= 2 and contingency_table.shape[1] >= 2:
+        categorical_guard = validate_contingency(filtered_df, cat_a, cat_b)
+        render_edustatguard(categorical_guard)
+
+        if categorical_guard.blocked:
+            st.info(
+                "The contingency table is shown descriptively, but the association test was not run. "
+                "Use the repair guidance above before drawing an inferential conclusion."
+            )
+        elif contingency_table.shape[0] >= 2 and contingency_table.shape[1] >= 2:
             chi2, p, dof, expected = stats.chi2_contingency(contingency_table)
 
             cat_results = [
@@ -1258,10 +1339,11 @@ with tabs[6]:
 
             st.subheader("Results")
             st.dataframe(
-                pd.DataFrame(cat_results),
+                format_p_value_columns(pd.DataFrame(cat_results)),
                 use_container_width=True,
                 hide_index=True,
             )
+            st.caption("P-values smaller than .001 are displayed as p < .001; a p-value is never reported as zero.")
 
         else:
             st.warning("The contingency table is too small for association tests.")
@@ -1936,4 +2018,3 @@ with tabs[11]:
         mime="text/csv",
         use_container_width=True,
     )
-

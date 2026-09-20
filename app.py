@@ -2,6 +2,8 @@
 
 import streamlit as st
 
+from modules.rtl_layout import install_arabic_text_layout
+
 
 st.set_page_config(
     page_title="EduApp | Translation and Post-Editing",
@@ -86,6 +88,10 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# Apply RTL, right alignment, and paragraph justification only when the visible
+# content is predominantly Arabic. English interface text remains left-to-right.
+install_arabic_text_layout()
 
 pages = {
     "Start": [
