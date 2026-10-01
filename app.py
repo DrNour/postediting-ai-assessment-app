@@ -149,6 +149,11 @@ pages = {
             title="Research Analytics",
             icon="🔬",
         ),
+        st.Page(
+            "pages/9_Advanced_Research_Analytics.py",
+            title="Advanced Research Analytics",
+            icon="🧭",
+        ),
         st.Page("pages/7_Evaluation.py", title="Evaluation", icon="📈"),
     ],
 }
