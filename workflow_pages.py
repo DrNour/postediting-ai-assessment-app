@@ -8,12 +8,14 @@ import secrets as pysecrets
 import string
 import time
 from collections import Counter
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from docx import Document
-from docx.shared import RGBColor
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from supabase import create_client
 from metrics import compare_postedit_with_raw_mt, build_research_metrics_payload
 from modules.auth import require_teacher_access
@@ -1039,44 +1041,93 @@ def add_docx_section(document, title, text):
     document.add_paragraph(safe_text(text))
 
 
+def _append_docx_text(run, tag_name, text):
+    text_element = OxmlElement(tag_name)
+    text_element.text = text
+    if text[:1].isspace() or text[-1:].isspace():
+        text_element.set(qn("xml:space"), "preserve")
+    run.append(text_element)
+
+
+def _make_docx_run(text, *, deleted=False):
+    run = OxmlElement("w:r")
+    _append_docx_text(run, "w:delText" if deleted else "w:t", text)
+    return run
+
+
+def _make_docx_revision(tag_name, text, revision_id, author, timestamp, *, deleted=False):
+    revision = OxmlElement(tag_name)
+    revision.set(qn("w:id"), str(revision_id))
+    revision.set(qn("w:author"), author)
+    revision.set(qn("w:date"), timestamp)
+    revision.append(_make_docx_run(text, deleted=deleted))
+    return revision
+
+
+def _enable_docx_track_revisions(document):
+    settings = document.settings.element
+    track_revisions = settings.find(qn("w:trackRevisions"))
+    if track_revisions is None:
+        track_revisions = OxmlElement("w:trackRevisions")
+        settings.insert(0, track_revisions)
+
+
 def add_track_changes_to_docx(document, original_text, edited_text):
-    document.add_heading("Track Changes Style Preview", level=2)
+    """Add genuine Word revision markup for machine-translation post-editing.
 
-    paragraph = document.add_paragraph()
-
+    Word renders w:del and w:ins as deletions and insertions in Review > All
+    Markup. The unmarked runs are the text kept from the raw MT.
+    """
     original_words = safe_text(original_text).split()
     edited_words = safe_text(edited_text).split()
 
+    if not original_words and not edited_words:
+        return
+
+    _enable_docx_track_revisions(document)
+    document.add_heading("Tracked Changes: Machine Translation to Post-Edited Text", level=2)
+    document.add_paragraph(
+        "Open this document in Microsoft Word and select Review > All Markup to "
+        "view the recorded deletions and insertions."
+    )
+    paragraph = document.add_paragraph()
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     matcher = difflib.SequenceMatcher(None, original_words, edited_words)
+    revision_id = 1
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        original_segment = " ".join(original_words[i1:i2])
+        edited_segment = " ".join(edited_words[j1:j2])
+
         if tag == "equal":
-            for word in original_words[i1:i2]:
-                run = paragraph.add_run(word + " ")
-                run.font.color.rgb = RGBColor(17, 24, 39)
+            if original_segment:
+                paragraph._p.append(_make_docx_run(original_segment + " "))
+            continue
 
-        elif tag == "delete":
-            for word in original_words[i1:i2]:
-                run = paragraph.add_run(word + " ")
-                run.font.strike = True
-                run.font.color.rgb = RGBColor(153, 27, 27)
+        if tag in {"delete", "replace"} and original_segment:
+            paragraph._p.append(
+                _make_docx_revision(
+                    "w:del",
+                    original_segment + " ",
+                    revision_id,
+                    "EduApp-PE",
+                    timestamp,
+                    deleted=True,
+                )
+            )
+            revision_id += 1
 
-        elif tag == "insert":
-            for word in edited_words[j1:j2]:
-                run = paragraph.add_run(word + " ")
-                run.bold = True
-                run.font.color.rgb = RGBColor(6, 95, 70)
-
-        elif tag == "replace":
-            for word in original_words[i1:i2]:
-                run = paragraph.add_run(word + " ")
-                run.font.strike = True
-                run.font.color.rgb = RGBColor(153, 27, 27)
-
-            for word in edited_words[j1:j2]:
-                run = paragraph.add_run(word + " ")
-                run.bold = True
-                run.font.color.rgb = RGBColor(6, 95, 70)
+        if tag in {"insert", "replace"} and edited_segment:
+            paragraph._p.append(
+                _make_docx_revision(
+                    "w:ins",
+                    edited_segment + " ",
+                    revision_id,
+                    "EduApp-PE",
+                    timestamp,
+                )
+            )
+            revision_id += 1
 
 
 def create_submission_docx(submission):
