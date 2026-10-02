@@ -17,6 +17,11 @@ from docx.shared import RGBColor
 from supabase import create_client
 from metrics import compare_postedit_with_raw_mt, build_research_metrics_payload
 from modules.auth import require_teacher_access
+from modules.mqm_prompts import (
+    MQM_PROMPT_OPTIONS,
+    get_mqm_prompt_spec,
+    prompt_event,
+)
 from modules.task_mode import (
     ADAPTIVE_TRANSLATION,
     POST_EDITING,
@@ -171,26 +176,9 @@ def get_adaptive_translation_help(source_text, student_draft, help_type, student
 
     client = genai.Client(api_key=api_key)
 
-    help_instructions = {
-        "Terminology help": (
-            "Identify difficult or domain-specific terms in the source and give concise target-language "
-            "translation options with brief usage notes. Do not rewrite the entire translation."
-        ),
-        "Meaning / ambiguity help": (
-            "Explain ambiguous, idiomatic, or structurally difficult parts of the source. Offer alternative "
-            "interpretations where appropriate. Do not produce a complete translation."
-        ),
-        "Review my current draft": (
-            "Review the student's current translation for meaning, omissions, terminology, grammar, fluency, "
-            "and style. Point out specific issues and suggest local revisions rather than replacing the whole text."
-        ),
-        "Suggest the next segment": (
-            "Based on the source and the student's current draft, suggest how to translate only the next short "
-            "untranslated segment. Explain the choice briefly. Do not provide the full remaining translation."
-        ),
-    }
-
-    instruction = help_instructions.get(help_type, help_instructions["Terminology help"])
+    prompt_spec = get_mqm_prompt_spec(help_type)
+    help_type = prompt_spec["help_type"]
+    instruction = prompt_spec["instruction"]
     question = safe_text(student_question)
     prompt = f"""
 You are an adaptive translation assistant inside a university translation-learning application.
@@ -202,7 +190,10 @@ SOURCE TEXT:
 STUDENT'S CURRENT DRAFT:
 {safe_text(student_draft) or '[No draft yet]'}
 
-TYPE OF HELP REQUESTED:
+HUMAN-CONFIGURED MQM DIAGNOSTIC CATEGORY:
+{prompt_spec["mqm_category"]}
+
+LEARNER-SELECTED HELP TYPE:
 {help_type}
 
 STUDENT QUESTION (if any):
@@ -1835,17 +1826,12 @@ def student_assignment_page():
         if is_adaptive_translation(task_type):
             st.markdown("### Adaptive AI Assistant")
             st.caption(
-                "AI assistance is intentionally available in this condition. The assistant gives on-demand "
-                "guidance, while the final translation remains in your own response box."
+                "Choose a human-authored MQM diagnostic area. The assistant gives guidance, "
+                "while the final translation remains in your own response box."
             )
             ai_help_type = st.selectbox(
-                "What kind of help do you want?",
-                [
-                    "Terminology help",
-                    "Meaning / ambiguity help",
-                    "Review my current draft",
-                    "Suggest the next segment",
-                ],
+                "Which MQM area would you like diagnostic help with?",
+                MQM_PROMPT_OPTIONS,
                 key=f"adaptive_help_type_{selected_assignment_id}",
             )
             ai_question = st.text_input(
@@ -1853,6 +1839,9 @@ def student_assignment_page():
                 placeholder="Example: What does this phrase mean in context?",
                 key=f"adaptive_question_{selected_assignment_id}",
             )
+            prompt_event_key = f"adaptive_prompt_events_{selected_assignment_id}_{student_id_key}"
+            st.session_state.setdefault(prompt_event_key, [])
+
             if st.button(
                 "Ask the adaptive AI assistant",
                 key=f"adaptive_ai_button_{selected_assignment_id}",
@@ -1869,9 +1858,26 @@ def student_assignment_page():
                         source_text, student_answer, ai_help_type, ai_question
                     )
                 if ai_error:
+                    st.session_state[prompt_event_key].append(
+                        prompt_event(
+                            help_type=ai_help_type,
+                            student_question=ai_question,
+                            draft_before_prompt=student_answer,
+                            status="unavailable",
+                        )
+                    )
                     st.error(ai_error)
                 else:
                     st.session_state[f"adaptive_ai_response_{selected_assignment_id}"] = ai_text
+                    st.session_state[prompt_event_key].append(
+                        prompt_event(
+                            help_type=ai_help_type,
+                            student_question=ai_question,
+                            draft_before_prompt=student_answer,
+                            response_text=ai_text,
+                            status="responded",
+                        )
+                    )
 
             adaptive_response = st.session_state.get(
                 f"adaptive_ai_response_{selected_assignment_id}", ""
@@ -2142,6 +2148,14 @@ def student_assignment_page():
                 "quality_warnings": quality_warnings,
                 "teacher_score": None,
                 "teacher_feedback": "",
+                "adaptive_prompt_events": (
+                    st.session_state.get(
+                        f"adaptive_prompt_events_{selected_assignment_id}_{student_id_key}",
+                        [],
+                    )
+                    if is_adaptive_translation(task_type)
+                    else []
+                ),
             }
 
             submission.update(mt_pe_metrics)
